@@ -38,6 +38,7 @@ public interface Message extends Encodable {
     RpcRequest(3), RpcResponse(4), RpcFailure(5),
     StreamRequest(6), StreamResponse(7), StreamFailure(8),
     OneWayMessage(9), UploadStream(10), MergedBlockMetaRequest(11), MergedBlockMetaSuccess(12),
+    StreamingShuffleAck(13), StreamingShuffleHeartbeat(14),
     User(-1);
 
     private final byte id;
@@ -69,6 +70,8 @@ public interface Message extends Encodable {
         case 10 -> UploadStream;
         case 11 -> MergedBlockMetaRequest;
         case 12 -> MergedBlockMetaSuccess;
+        case 13 -> StreamingShuffleAck;
+        case 14 -> StreamingShuffleHeartbeat;
         case -1 -> throw new IllegalArgumentException("User type messages cannot be decoded.");
         default -> throw new IllegalArgumentException("Unknown message type: " + id);
       };
