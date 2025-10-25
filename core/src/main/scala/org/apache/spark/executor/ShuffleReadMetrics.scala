@@ -46,6 +46,7 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
   private[executor] val _localMergedBytesRead = new LongAccumulator
   private[executor] val _remoteReqsDuration = new LongAccumulator
   private[executor] val _remoteMergedReqsDuration = new LongAccumulator
+  private[executor] val _partialReadInvalidations = new LongAccumulator
 
   /**
    * Number of remote blocks fetched in this shuffle by this task.
@@ -146,6 +147,13 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
    */
   def remoteMergedReqsDuration: Long = _remoteMergedReqsDuration.sum
 
+  /**
+   * Number of partial read invalidations due to streaming shuffle producer failures.
+   * This tracks how many times a consumer had to discard partial reads and trigger
+   * upstream recomputation when a producer failed mid-shuffle.
+   */
+  def partialReadInvalidations: Long = _partialReadInvalidations.sum
+
   private[spark] def incRemoteBlocksFetched(v: Long): Unit = _remoteBlocksFetched.add(v)
   private[spark] def incLocalBlocksFetched(v: Long): Unit = _localBlocksFetched.add(v)
   private[spark] def incRemoteBytesRead(v: Long): Unit = _remoteBytesRead.add(v)
@@ -165,6 +173,7 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
     _localMergedBytesRead.add(v)
   private[spark] def incRemoteReqsDuration(v: Long): Unit = _remoteReqsDuration.add(v)
   private[spark] def incRemoteMergedReqsDuration(v: Long): Unit = _remoteMergedReqsDuration.add(v)
+  private[spark] def incPartialReadInvalidations(v: Long): Unit = _partialReadInvalidations.add(v)
 
   private[spark] def setRemoteBlocksFetched(v: Int): Unit = _remoteBlocksFetched.setValue(v)
   private[spark] def setLocalBlocksFetched(v: Int): Unit = _localBlocksFetched.setValue(v)
@@ -192,6 +201,8 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
   private[spark] def setRemoteReqsDuration(v: Long): Unit = _remoteReqsDuration.setValue(v)
   private[spark] def setRemoteMergedReqsDuration(v: Long): Unit =
     _remoteMergedReqsDuration.setValue(v)
+  private[spark] def setPartialReadInvalidations(v: Long): Unit = 
+    _partialReadInvalidations.setValue(v)
 
   /**
    * Resets the value of the current metrics (`this`) and merges all the independent
@@ -215,6 +226,7 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
     _localMergedBytesRead.setValue(0)
     _remoteReqsDuration.setValue(0)
     _remoteMergedReqsDuration.setValue(0)
+    _partialReadInvalidations.setValue(0)
     metrics.foreach { metric =>
       _remoteBlocksFetched.add(metric.remoteBlocksFetched)
       _localBlocksFetched.add(metric.localBlocksFetched)
@@ -233,6 +245,8 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
       _localMergedBytesRead.add(metric.localMergedBytesRead)
       _remoteReqsDuration.add(metric.remoteReqsDuration)
       _remoteMergedReqsDuration.add(metric.remoteMergedReqsDuration)
+      // Note: TempShuffleReadMetrics doesn't track partialReadInvalidations as it's only
+      // relevant for the main ShuffleReadMetrics instance
     }
   }
 }
