@@ -18,6 +18,7 @@
 package org.apache.spark.memory
 
 import javax.annotation.concurrent.GuardedBy
+import scala.collection.mutable
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
@@ -54,6 +55,8 @@ private[spark] abstract class MemoryManager(
   protected val onHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.ON_HEAP)
   @GuardedBy("this")
   protected val offHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.OFF_HEAP)
+  @GuardedBy("this")
+  private val streamingShuffleMemoryPool = new mutable.HashMap[Long, Long]()
 
   onHeapStorageMemoryPool.incrementPoolSize(onHeapStorageMemory)
   onHeapExecutionMemoryPool.incrementPoolSize(onHeapExecutionMemory)
@@ -132,6 +135,46 @@ private[spark] abstract class MemoryManager(
       case MemoryMode.ON_HEAP => onHeapExecutionMemoryPool.releaseMemory(numBytes, taskAttemptId)
       case MemoryMode.OFF_HEAP => offHeapExecutionMemoryPool.releaseMemory(numBytes, taskAttemptId)
     }
+  }
+
+  /**
+   * Acquire N bytes of memory for streaming shuffle buffers for the given task.
+   * This method delegates to the existing execution memory allocation mechanism while
+   * maintaining separate accounting for streaming shuffle memory usage.
+   *
+   * @param taskAttemptId the task attempt ID
+   * @param numBytes the number of bytes to acquire
+   * @param memoryMode whether to allocate on-heap or off-heap memory
+   * @return the number of bytes successfully acquired
+   */
+  private[memory]
+  def acquireStreamingShuffleMemory(
+      taskAttemptId: Long,
+      numBytes: Long,
+      memoryMode: MemoryMode): Long = synchronized {
+    val acquired = acquireExecutionMemory(numBytes, taskAttemptId, memoryMode)
+    streamingShuffleMemoryPool(taskAttemptId) =
+      streamingShuffleMemoryPool.getOrElse(taskAttemptId, 0L) + acquired
+    acquired
+  }
+
+  /**
+   * Release N bytes of streaming shuffle memory belonging to the given task.
+   * This method delegates to the existing execution memory release mechanism while
+   * maintaining separate accounting for streaming shuffle memory usage.
+   *
+   * @param taskAttemptId the task attempt ID
+   * @param numBytes the number of bytes to release
+   * @param memoryMode whether to release on-heap or off-heap memory
+   */
+  private[memory]
+  def releaseStreamingShuffleMemory(
+      taskAttemptId: Long,
+      numBytes: Long,
+      memoryMode: MemoryMode): Unit = synchronized {
+    releaseExecutionMemory(numBytes, taskAttemptId, memoryMode)
+    val current = streamingShuffleMemoryPool.getOrElse(taskAttemptId, 0L)
+    streamingShuffleMemoryPool(taskAttemptId) = math.max(0, current - numBytes)
   }
 
   /**
