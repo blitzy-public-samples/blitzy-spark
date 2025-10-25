@@ -110,6 +110,7 @@ private[spark] object ShuffleManager {
 
   def getShuffleManagerClassName(conf: SparkConf): String = {
     val shortShuffleMgrNames = Map(
+      "streaming" -> classOf[org.apache.spark.shuffle.streaming.StreamingShuffleManager].getName,
       "sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName,
       "tungsten-sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName)
 
