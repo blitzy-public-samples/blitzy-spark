@@ -214,4 +214,31 @@ public class Encoders {
       return bitmaps;
     }
   }
+
+  /**
+   * Streaming shuffle acknowledgments are encoded with their length followed by long integers.
+   *
+   * @since 4.1.0
+   */
+  public static class StreamingAcknowledgments {
+    public static int encodedLength(long[] partitionOffsets) {
+      return 4 + 8 * partitionOffsets.length;
+    }
+
+    public static void encode(ByteBuf buf, long[] partitionOffsets) {
+      buf.writeInt(partitionOffsets.length);
+      for (long offset : partitionOffsets) {
+        buf.writeLong(offset);
+      }
+    }
+
+    public static long[] decode(ByteBuf buf) {
+      int numOffsets = buf.readInt();
+      long[] offsets = new long[numOffsets];
+      for (int i = 0; i < offsets.length; i ++) {
+        offsets[i] = buf.readLong();
+      }
+      return offsets;
+    }
+  }
 }
