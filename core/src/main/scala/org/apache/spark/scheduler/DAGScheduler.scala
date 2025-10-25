@@ -2732,6 +2732,49 @@ private[spark] class DAGScheduler(
     }
   }
 
+  /**
+   * Handles streaming shuffle partial read invalidation events.
+   * When a streaming shuffle consumer detects producer failure (via timeout),
+   * this handler invalidates the failed producer's map output and triggers
+   * upstream recomputation to ensure zero data loss.
+   *
+   * @param shuffleId The shuffle ID where the failure occurred
+   * @param mapId The map task ID of the failed producer
+   * @param bmAddress The BlockManagerId of the failed producer executor
+   */
+  private[scheduler] def handleStreamingShufflePartialReadInvalidated(
+      shuffleId: Int,
+      mapId: Long,
+      bmAddress: BlockManagerId): Unit = {
+    // Invalidate map output for failed producer
+    mapOutputTracker.unregisterMapOutput(shuffleId, mapId.toInt, bmAddress)
+
+    // Find stages dependent on this shuffle
+    shuffleIdToMapStage.get(shuffleId) match {
+      case Some(mapStage) =>
+        // Trigger upstream recomputation via fetch failure
+        handleTaskCompletion(
+          CompletionEvent(
+            task = null,
+            reason = FetchFailed(
+              bmAddress,
+              shuffleId,
+              mapId,
+              mapId.toInt,
+              -1,
+              "Streaming shuffle producer failure detected"
+            ),
+            result = null,
+            accumUpdates = Seq.empty,
+            metricPeaks = Array.empty,
+            taskInfo = null
+          )
+        )
+      case None =>
+        logWarning(log"Streaming shuffle failure for unknown shuffle ${MDC(SHUFFLE_ID, shuffleId)}")
+    }
+  }
+
   private def handleResubmittedFailure(task: Task[_], stage: Stage): Unit = {
               logInfo(log"Resubmitted ${MDC(TASK_NAME, task)}, so marking it as still running.")
     stage match {
@@ -3272,30 +3315,7 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
       dagScheduler.handleShufflePushCompleted(shuffleId, shuffleMergeId, mapIndex)
 
     case StreamingShufflePartialReadInvalidated(shuffleId, mapId, bmAddress) =>
-      // Invalidate map output for failed producer
-      dagScheduler.mapOutputTracker.unregisterMapOutput(shuffleId, mapId.toInt, bmAddress)
-
-      // Find stages dependent on this shuffle
-      val failedStage = dagScheduler.shuffleIdToMapStage.get(shuffleId)
-      if (failedStage.isDefined) {
-        // Trigger upstream recomputation via fetch failure
-        dagScheduler.handleTaskCompletion(
-          CompletionEvent(
-            task = null,
-            reason = FetchFailed(
-              bmAddress,
-              shuffleId,
-              mapId.toInt,
-              -1,
-              "Streaming shuffle producer failure detected"
-            ),
-            result = null,
-            accumUpdates = Seq.empty,
-            metricPeaks = Array.empty,
-            taskInfo = null
-          )
-        )
-      }
+      dagScheduler.handleStreamingShufflePartialReadInvalidated(shuffleId, mapId, bmAddress)
   }
 
   override def onError(e: Throwable): Unit = {
