@@ -1819,6 +1819,52 @@ package object config {
       .booleanConf
       .createWithDefault(true)
 
+  private[spark] val SHUFFLE_STREAMING_ENABLED =
+    ConfigBuilder("spark.shuffle.streaming.enabled")
+      .doc("Opt-in feature flag enabling streaming shuffle capability that eliminates " +
+        "shuffle materialization latency by streaming data directly from map tasks to reduce " +
+        "tasks with memory-mapped buffers, backpressure protocol, and automatic disk spill.")
+      .version("4.1.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT =
+    ConfigBuilder("spark.shuffle.streaming.bufferSizePercent")
+      .doc("Percentage of executor memory (1-50%) allocated for streaming shuffle " +
+        "per-partition buffers. Per-partition size = (executorMemory * bufferPercent) / " +
+        "numPartitions. Default 20% balances memory efficiency with performance.")
+      .version("4.1.0")
+      .intConf
+      .checkValue(v => v >= 1 && v <= 50, "Buffer size percent must be between 1 and 50.")
+      .createWithDefault(20)
+
+  private[spark] val SHUFFLE_STREAMING_SPILL_THRESHOLD =
+    ConfigBuilder("spark.shuffle.streaming.spillThreshold")
+      .doc("Buffer utilization threshold (50-95%) triggering automatic disk spill. " +
+        "Monitored at 100ms intervals with LRU partition selection. Default 80% balances " +
+        "memory efficiency with spill frequency.")
+      .version("4.1.0")
+      .intConf
+      .checkValue(v => v >= 50 && v <= 95, "Spill threshold must be between 50 and 95 percent.")
+      .createWithDefault(80)
+
+  private[spark] val SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS =
+    ConfigBuilder("spark.shuffle.streaming.maxBandwidthMBps")
+      .doc("Maximum network bandwidth in MB/s for streaming shuffle. When set, enforces " +
+        "token bucket rate limiting at 80% of link capacity. Unset means unlimited bandwidth.")
+      .version("4.1.0")
+      .intConf
+      .checkValue(_ > 0, "Max bandwidth must be a positive value.")
+      .createOptional
+
+  private[spark] val SHUFFLE_STREAMING_DEBUG =
+    ConfigBuilder("spark.shuffle.streaming.debug")
+      .doc("Enable verbose debug logging for streaming shuffle operations. Disabled by " +
+        "default to minimize overhead (<1% CPU, <10MB/hour logs).")
+      .version("4.1.0")
+      .booleanConf
+      .createWithDefault(false)
+
   private[spark] val STORAGE_LOCAL_DISK_BY_EXECUTORS_CACHE_SIZE =
     ConfigBuilder("spark.storage.localDiskByExecutors.cacheSize")
       .doc("The max number of executors for which the local dirs are stored. This size is " +
