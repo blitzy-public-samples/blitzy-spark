@@ -3270,6 +3270,32 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
 
     case ShufflePushCompleted(shuffleId, shuffleMergeId, mapIndex) =>
       dagScheduler.handleShufflePushCompleted(shuffleId, shuffleMergeId, mapIndex)
+
+    case StreamingShufflePartialReadInvalidated(shuffleId, mapId, bmAddress) =>
+      // Invalidate map output for failed producer
+      dagScheduler.mapOutputTracker.unregisterMapOutput(shuffleId, mapId.toInt, bmAddress)
+
+      // Find stages dependent on this shuffle
+      val failedStage = dagScheduler.shuffleIdToMapStage.get(shuffleId)
+      if (failedStage.isDefined) {
+        // Trigger upstream recomputation via fetch failure
+        dagScheduler.handleTaskCompletion(
+          CompletionEvent(
+            task = null,
+            reason = FetchFailed(
+              bmAddress,
+              shuffleId,
+              mapId.toInt,
+              -1,
+              "Streaming shuffle producer failure detected"
+            ),
+            result = null,
+            accumUpdates = Seq.empty,
+            metricPeaks = Array.empty,
+            taskInfo = null
+          )
+        )
+      }
   }
 
   override def onError(e: Throwable): Unit = {
