@@ -206,7 +206,7 @@ private[spark] class BackpressureProtocol(
       (-ctx.numPartitions, -ctx.dataVolumeBytes, ctx.shuffleId)
     }
     
-    if (logIsDebugEnabled) {
+    if (log.isDebugEnabled) {
       logDebug("Memory allocation priorities:")
       prioritized.zipWithIndex.foreach { case (ctx, idx) =>
         logDebug(s"  ${idx + 1}. Shuffle ${ctx.shuffleId}: " +
