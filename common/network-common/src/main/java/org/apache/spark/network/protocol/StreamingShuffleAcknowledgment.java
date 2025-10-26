@@ -104,20 +104,29 @@ public final class StreamingShuffleAcknowledgment extends AbstractMessage {
   }
 
   @Override
-  public boolean equals(Object other) {
-    if (other instanceof StreamingShuffleAcknowledgment o) {
-      return shuffleId == o.shuffleId &&
-             mapId == o.mapId &&
-             partitionId == o.partitionId &&
-             consumedOffset == o.consumedOffset &&
-             complete == o.complete;
-    }
-    return false;
+  public int hashCode() {
+    return Objects.hash(shuffleId, mapId, partitionId, consumedOffset, complete);
+  }
+
+  /**
+   * Override the AbstractMessage equals method to delegate to the proper equals(Object) method.
+   * This prevents method resolution ambiguity when calling equals on typed references.
+   */
+  protected boolean equals(AbstractMessage other) {
+    return equals((Object) other);
   }
 
   @Override
-  public int hashCode() {
-    return Objects.hash(shuffleId, mapId, partitionId, consumedOffset, complete);
+  public boolean equals(Object other) {
+    if (!(other instanceof StreamingShuffleAcknowledgment)) {
+      return false;
+    }
+    StreamingShuffleAcknowledgment o = (StreamingShuffleAcknowledgment) other;
+    return shuffleId == o.shuffleId &&
+           mapId == o.mapId &&
+           partitionId == o.partitionId &&
+           consumedOffset == o.consumedOffset &&
+           complete == o.complete;
   }
 
   @Override

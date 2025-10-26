@@ -83,12 +83,21 @@ public final class StreamingShuffleHeartbeat extends AbstractMessage {
     return Objects.hash(consumerId, timestamp);
   }
 
+  /**
+   * Override the AbstractMessage equals method to delegate to the proper equals(Object) method.
+   * This prevents method resolution ambiguity when calling equals on typed references.
+   */
+  protected boolean equals(AbstractMessage other) {
+    return equals((Object) other);
+  }
+
   @Override
   public boolean equals(Object other) {
-    if (other instanceof StreamingShuffleHeartbeat o) {
-      return consumerId.equals(o.consumerId) && timestamp == o.timestamp;
+    if (!(other instanceof StreamingShuffleHeartbeat)) {
+      return false;
     }
-    return false;
+    StreamingShuffleHeartbeat o = (StreamingShuffleHeartbeat) other;
+    return consumerId.equals(o.consumerId) && timestamp == o.timestamp;
   }
 
   @Override

@@ -305,7 +305,6 @@ public class StreamingShuffleProtocolSuite {
     assertEquals(ack1.hashCode(), ack2.hashCode());
 
     // Test equals() - different objects should not be equal
-    assertNotEquals(ack1, ack3);
     assertFalse(ack1.equals(ack3));
 
     // Test equals() with null
@@ -332,14 +331,14 @@ public class StreamingShuffleProtocolSuite {
     assertEquals(heartbeat1.hashCode(), heartbeat2.hashCode());
 
     // Test equals() - different objects should not be equal
-    assertNotEquals(heartbeat1, heartbeat3);
-    assertFalse(heartbeat1.equals(heartbeat3));
+    // assertNotEquals(heartbeat1, heartbeat3);
+    assertTrue(!heartbeat1.equals(heartbeat3)); // Changed from assertFalse to assertTrue(!...)
 
     // Test equals() with null
-    assertFalse(heartbeat1.equals(null));
+    assertTrue(!heartbeat1.equals(null)); // Changed from assertFalse to assertTrue(!...)
 
     // Test equals() with different type
-    assertFalse(heartbeat1.equals("not a heartbeat"));
+    assertTrue(!heartbeat1.equals("not a heartbeat")); // Changed from assertFalse to assertTrue(!...)
   }
 
   /**
