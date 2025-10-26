@@ -2749,27 +2749,40 @@ private[spark] class DAGScheduler(
     // Invalidate map output for failed producer
     mapOutputTracker.unregisterMapOutput(shuffleId, mapId.toInt, bmAddress)
 
-    // Find stages dependent on this shuffle
+    // Find the map stage that produced this shuffle
     shuffleIdToMapStage.get(shuffleId) match {
       case Some(mapStage) =>
-        // Trigger upstream recomputation via fetch failure
-        handleTaskCompletion(
-          CompletionEvent(
-            task = null,
-            reason = FetchFailed(
-              bmAddress,
-              shuffleId,
-              mapId,
-              mapId.toInt,
-              -1,
-              "Streaming shuffle producer failure detected"
-            ),
-            result = null,
-            accumUpdates = Seq.empty,
-            metricPeaks = Array.empty,
-            taskInfo = null
+        logInfo(log"Streaming shuffle producer failure detected for shuffle " +
+          log"${MDC(SHUFFLE_ID, shuffleId)}, map ${MDC(MAP_ID, mapId)} " +
+          log"at ${MDC(BLOCK_MANAGER_ID, bmAddress)}")
+
+        // If the failed map stage is still running, mark it as failed to trigger resubmission
+        if (runningStages.contains(mapStage)) {
+          logInfo(log"Marking ${MDC(STAGE, mapStage)} " +
+            log"(${MDC(STAGE_NAME, mapStage.name)}) as failed due to " +
+            log"streaming shuffle producer failure from " +
+            log"${MDC(BLOCK_MANAGER_ID, bmAddress)}")
+
+          // Mark the stage as failed with retry enabled
+          markStageAsFinished(
+            mapStage,
+            errorMessage = Some(s"Streaming shuffle producer failure at $bmAddress for map $mapId"),
+            willRetry = true
           )
-        )
+
+          // Add to failed stages for resubmission
+          failedStages += mapStage
+
+          // Clear cache locations to force recomputation
+          clearCacheLocs()
+
+          // Post event to trigger resubmission of failed stages
+          eventProcessLoop.post(ResubmitFailedStages)
+        } else {
+          logDebug(log"Received streaming shuffle failure for ${MDC(STAGE, mapStage)}, " +
+            log"but it's no longer running")
+        }
+
       case None =>
         logWarning(log"Streaming shuffle failure for unknown shuffle ${MDC(SHUFFLE_ID, shuffleId)}")
     }
