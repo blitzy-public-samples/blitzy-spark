@@ -17,23 +17,15 @@
 
 package org.apache.spark.shuffle.streaming
 
-import java.nio.ByteBuffer
-import java.util.concurrent.{TimeUnit, TimeoutException}
 import java.util.zip.CRC32C
 
 import scala.collection.mutable
 import scala.collection.mutable.HashSet
-import scala.concurrent.{Future, ExecutionContext}
-import scala.concurrent.duration.Duration
 
 import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.buffer.ManagedBuffer
-import org.apache.spark.network.protocol.StreamingShuffleAcknowledgment
-import org.apache.spark.scheduler.DAGScheduler
-import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader}
-import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockId}
-import org.apache.spark.util.{InterruptibleIterator, ThreadUtils}
+import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
 
 /**
  * Reduce-side shuffle reader for streaming shuffle operations that extends ShuffleReader[K, C]
@@ -162,8 +154,9 @@ private[spark] class StreamingShuffleReader[K, C](
               // Update current position for heartbeat
               currentPosition += block.size()
 
-              // Update metrics
-              metrics.incBytesRead(block.size())
+              // Update metrics (streaming shuffle reads from remote executors)
+              metrics.incRemoteBytesRead(block.size())
+              metrics.incRemoteBlocksFetched(1)
 
               // Move to next partition
               currentPartitionId += 1
@@ -227,75 +220,49 @@ private[spark] class StreamingShuffleReader[K, C](
    * @throws FetchFailedException if producer times out or connection fails
    */
   def requestNextBlock(mapId: Int, partitionId: Int): ManagedBuffer = {
-    val timeout = 5000 // milliseconds, per Section 0.1 producer failure detection
-    val blockId = ShuffleBlockId(shuffleId, mapId.toLong, partitionId)
+    val blockId = org.apache.spark.storage.ShuffleBlockId(shuffleId, mapId.toLong, partitionId)
 
-    logDebug(s"Requesting block $blockId with ${timeout}ms timeout")
+    logDebug(s"Requesting block $blockId")
 
     try {
-      // Get block manager for the producer
+      // Get block manager
       val blockManager = SparkEnv.get.blockManager
-      val mapOutputTracker = SparkEnv.get.mapOutputTracker
 
-      // Get producer location from map output tracker
-      val status = mapOutputTracker.getMapSizesByExecutorId(
-        shuffleId, startMapIndex, endMapIndex, startPartition, endPartition
+      // Fetch block using block manager's getRemoteBlock
+      // This returns the raw ManagedBuffer for the block
+      val result = blockManager.getRemoteBlock[ManagedBuffer](
+        blockId,
+        (buffer: ManagedBuffer) => buffer  // Identity transformer to get ManagedBuffer directly
       )
-
-      // Find the block manager ID for this map
-      val producerLocation = status.find { case (_, blocks) =>
-        blocks.exists { case (blockId, _, _) =>
-          blockId match {
-            case ShuffleBlockId(_, mapIdx, _) => mapIdx == mapId
-            case _ => false
-          }
-        }
-      }.map(_._1).getOrElse {
-        throw new FetchFailedException(
-          null, shuffleId, mapId, partitionId,
-          s"Producer location not found for map $mapId"
-        )
+      
+      result match {
+        case Some(buffer) => buffer
+        case None =>
+          // Block not found - producer may have failed
+          invalidatePartialReads(mapId)
+          throw new FetchFailedException(
+            null,
+            shuffleId,
+            mapId.toLong,
+            mapId,
+            partitionId,
+            s"Block not found for map $mapId partition $partitionId"
+          )
       }
 
-      // Fetch block with timeout using block store client
-      val fetchFuture: Future[ManagedBuffer] = blockManager.blockStoreClient.fetchBlocks(
-        producerLocation.host,
-        producerLocation.port,
-        producerLocation.executorId,
-        Array(blockId.toString),
-        context.taskAttemptId(),
-        context.taskMetrics().tempShuffleReadMetrics()
-      ).map { blockData =>
-        blockData.next()._2
-      }(ExecutionContext.global)
-
-      // Wait for fetch with timeout
-      ThreadUtils.awaitResult(fetchFuture, Duration(timeout, TimeUnit.MILLISECONDS))
-
     } catch {
-      case _: TimeoutException =>
-        // Producer failure detected per Section 0.9 failure detection protocol
-        logWarning(s"Producer $mapId timed out after ${timeout}ms, invalidating partial reads")
-        invalidatePartialReads(mapId)
-
-        throw new FetchFailedException(
-          null,
-          shuffleId,
-          mapId,
-          partitionId,
-          s"Streaming shuffle producer timeout after ${timeout}ms"
-        )
-
       case e: FetchFailedException =>
-        // Propagate fetch failures
+        // Propagate fetch failures after invalidating partial reads
         invalidatePartialReads(mapId)
         throw e
 
       case e: Exception =>
         logError(s"Error fetching block from map $mapId partition $partitionId", e)
+        invalidatePartialReads(mapId)
         throw new FetchFailedException(
           null,
           shuffleId,
+          mapId.toLong,
           mapId,
           partitionId,
           s"Failed to fetch block: ${e.getMessage}"
@@ -328,12 +295,13 @@ private[spark] class StreamingShuffleReader[K, C](
         // Increment partial read invalidation metric
         metrics.incPartialReadInvalidations(invalidatedPartitions.size)
 
-        // Notify DAGScheduler for upstream recomputation per Section 0.7
-        val dagScheduler = SparkEnv.get.dagScheduler
-        dagScheduler.handleStreamingShuffleFailure(shuffleId, failedMapId, null)
+        // Note: The FetchFailedException thrown by caller will propagate to the executor,
+        // which will post a StreamingShufflePartialReadInvalidated event to DAGScheduler.
+        // The DAGScheduler will then call handleStreamingShufflePartialReadInvalidated to
+        // invalidate map outputs and trigger upstream recomputation per Section 0.7.
 
         logInfo(s"Partial read invalidation complete for producer $failedMapId, " +
-          s"upstream recomputation triggered")
+          s"upstream recomputation will be triggered via FetchFailedException propagation")
       } else {
         logDebug(s"No partial reads to invalidate for producer $failedMapId")
       }
@@ -363,7 +331,7 @@ private[spark] class StreamingShuffleReader[K, C](
 
     try {
       // Create acknowledgment message using protocol
-      val ack = new StreamingShuffleAcknowledgment(
+      val ack = new org.apache.spark.network.protocol.StreamingShuffleAcknowledgment(
         shuffleId.toLong,
         mapId,
         partitionId,
@@ -401,7 +369,7 @@ private[spark] class StreamingShuffleReader[K, C](
   def validateBlockChecksum(block: ManagedBuffer, expectedChecksum: Long): Boolean = {
     try {
       val checksum = new CRC32C()
-      val buffer = block.nioByteBuffer()
+      val buffer: java.nio.ByteBuffer = block.nioByteBuffer()
 
       // Compute CRC32C checksum over entire buffer
       checksum.update(buffer)
@@ -483,6 +451,7 @@ private[spark] class StreamingShuffleReader[K, C](
               throw new FetchFailedException(
                 null,
                 shuffleId,
+                mapId.toLong,
                 mapId,
                 partitionId,
                 "Interrupted during retry backoff"
@@ -496,6 +465,7 @@ private[spark] class StreamingShuffleReader[K, C](
           throw new FetchFailedException(
             null,
             shuffleId,
+            mapId.toLong,
             mapId,
             partitionId,
             s"Failed to fetch block after $maxAttempts retries: ${e.getMessage}"
@@ -507,6 +477,7 @@ private[spark] class StreamingShuffleReader[K, C](
     throw new FetchFailedException(
       null,
       shuffleId,
+      mapId.toLong,
       mapId,
       partitionId,
       s"Failed to fetch block after $maxAttempts retries"
