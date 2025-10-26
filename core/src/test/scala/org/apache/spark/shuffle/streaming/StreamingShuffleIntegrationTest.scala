@@ -18,9 +18,8 @@
 package org.apache.spark.shuffle.streaming
 
 import java.lang.Thread
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
-import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -29,13 +28,8 @@ import scala.util.Random
 import org.scalatest.matchers.should.Matchers
 
 import org.apache.spark._
-import org.apache.spark.executor.ShuffleReadMetrics
 import org.apache.spark.internal.config._
-import org.apache.spark.rdd.RDD
 import org.apache.spark.scheduler._
-import org.apache.spark.shuffle.FetchFailedException
-import org.apache.spark.storage.BlockManagerId
-import org.apache.spark.util.Utils
 
 /**
  * End-to-end integration test suite for streaming shuffle validating complete 10GB shuffle
@@ -150,7 +144,7 @@ class StreamingShuffleIntegrationTest
       .set(SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT, 20)
       .set("spark.executor.memory", "1g")
       .set("spark.driver.memory", "1g")
-      .set("spark.task.maxFailures", 2) // Allow retry after failure
+      .set("spark.task.maxFailures", "2") // Allow retry after failure
 
     sc = new SparkContext("local-cluster[3,1,1024]", "producer-failure-test", conf)
     TestUtils.waitUntilExecutorsUp(sc, 3, 60000)
