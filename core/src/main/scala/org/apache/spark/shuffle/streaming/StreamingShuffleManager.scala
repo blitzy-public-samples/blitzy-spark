@@ -27,9 +27,8 @@ import com.codahale.metrics.Counter
 import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
-import org.apache.spark.memory.MemoryMode
 import org.apache.spark.shuffle._
-import org.apache.spark.shuffle.sort.{IndexShuffleBlockResolver, SortShuffleManager}
+import org.apache.spark.shuffle.sort.SortShuffleManager
 
 /**
  * Streaming Shuffle Manager implementing zero-materialization shuffle with direct
@@ -140,39 +139,24 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
     if (shouldUseStreaming(dependency)) {
       try {
         // Calculate required buffer size per Section 0.2
+        // Note: Actual memory allocation happens on executors during task execution,
+        // not during shuffle registration on the driver
         val numPartitions = dependency.partitioner.numPartitions
-        val executorMemory = SparkEnv.get.memoryManager.maxOnHeapExecutionMemory
-        val totalBufferSize = (executorMemory * bufferSizePercent) / 100
+        
+        // Calculate buffer size as percentage of configured executor memory
+        // This is a planning calculation - actual allocation happens in StreamingShuffleWriter
+        val executorMemoryMB = conf.get("spark.executor.memory", "1g")
+        val executorMemoryBytes = org.apache.spark.util.Utils.byteStringAsBytes(executorMemoryMB)
+        val totalBufferSize = (executorMemoryBytes * bufferSizePercent) / 100
         val bufferSizePerPartition = totalBufferSize / numPartitions
         
-        // Attempt to allocate execution memory for streaming buffers
-        val taskAttemptId = 0L // Placeholder for shuffle registration phase
-        val allocated = try {
-          SparkEnv.get.memoryManager.acquireExecutionMemory(
-            totalBufferSize,
-            taskAttemptId,
-            MemoryMode.ON_HEAP
-          )
-        } catch {
-          case _: OutOfMemoryError =>
-            logWarning(s"OOM during buffer allocation for streaming shuffle $shuffleId, " +
-              s"requested ${totalBufferSize} bytes, falling back to sort-based shuffle")
-            0L
-        }
-        
-        if (allocated < totalBufferSize) {
-          logWarning(s"Insufficient memory for streaming shuffle $shuffleId: " +
-            s"requested $totalBufferSize bytes, allocated $allocated bytes. " +
-            s"Falling back to sort-based shuffle.")
-          // Release partial allocation
-          if (allocated > 0) {
-            SparkEnv.get.memoryManager.releaseExecutionMemory(
-              allocated,
-              taskAttemptId,
-              MemoryMode.ON_HEAP
-            )
-          }
-          return fallbackManager.registerShuffle(shuffleId, dependency)
+        if (debugMode) {
+          logDebug(s"Calculated buffer size for streaming shuffle $shuffleId: " +
+            s"executorMemory=$executorMemoryMB, " +
+            s"bufferPercent=$bufferSizePercent%, " +
+            s"totalBufferSize=$totalBufferSize bytes, " +
+            s"numPartitions=$numPartitions, " +
+            s"bufferSizePerPartition=$bufferSizePerPartition bytes")
         }
         
         // Create streaming shuffle context and protocol instances
@@ -210,7 +194,8 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
             s"totalBufferSize=$totalBufferSize bytes")
         }
         
-        // Return StreamingShuffleHandle with allocated buffer size
+        // Return StreamingShuffleHandle with calculated buffer size
+        // Actual memory allocation will happen in StreamingShuffleWriter on executors
         new StreamingShuffleHandle(shuffleId, bufferSizePerPartition, dependency)
         
       } catch {
@@ -768,19 +753,9 @@ private[streaming] class StreamingShuffleContext(
           logWarning(s"Error stopping memory spill manager for shuffle $shuffleId", e)
       }
       
-      // Release allocated execution memory buffers
-      try {
-        val taskAttemptId = 0L // Placeholder for shuffle cleanup phase
-        SparkEnv.get.memoryManager.releaseExecutionMemory(
-          bufferSizeBytes,
-          taskAttemptId,
-          MemoryMode.ON_HEAP
-        )
-        logDebug(s"Released $bufferSizeBytes bytes of execution memory for shuffle $shuffleId")
-      } catch {
-        case e: Exception =>
-          logWarning(s"Error releasing execution memory for shuffle $shuffleId", e)
-      }
+      // Note: Memory is allocated and released by StreamingShuffleWriter on executors,
+      // not during shuffle registration/cleanup on the driver.
+      // No memory release needed here during shuffle unregistration.
       
       // Clean up backpressure protocol state
       try {
