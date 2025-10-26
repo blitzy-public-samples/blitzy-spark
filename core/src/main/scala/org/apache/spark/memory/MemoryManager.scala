@@ -147,7 +147,7 @@ private[spark] abstract class MemoryManager(
    * @param memoryMode whether to allocate on-heap or off-heap memory
    * @return the number of bytes successfully acquired
    */
-  private[memory]
+  private[spark]
   def acquireStreamingShuffleMemory(
       taskAttemptId: Long,
       numBytes: Long,
@@ -167,7 +167,7 @@ private[spark] abstract class MemoryManager(
    * @param numBytes the number of bytes to release
    * @param memoryMode whether to release on-heap or off-heap memory
    */
-  private[memory]
+  private[spark]
   def releaseStreamingShuffleMemory(
       taskAttemptId: Long,
       numBytes: Long,

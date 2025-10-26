@@ -17,7 +17,6 @@
 
 package org.apache.spark.shuffle.streaming
 
-import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable
 import scala.collection.mutable.HashMap
