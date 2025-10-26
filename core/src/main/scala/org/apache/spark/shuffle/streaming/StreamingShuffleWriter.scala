@@ -22,18 +22,17 @@ import java.nio.ByteBuffer
 import java.util.zip.CRC32C
 
 import scala.collection.mutable.ArrayBuffer
-import scala.util.{Failure, Success, Try}
 
 import org.apache.spark._
+import org.apache.spark.executor.ShuffleWriteMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.memory.MemoryMode
-import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
-import org.apache.spark.network.{TransportContext, TransportClient}
+import org.apache.spark.network.buffer.NioManagedBuffer
+import org.apache.spark.network.client.TransportClient
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.SerializationStream
 import org.apache.spark.shuffle.{ShuffleWriter, ShuffleWriteMetricsReporter}
-import org.apache.spark.storage.{BlockId, ShuffleBlockId}
-import org.apache.spark.util.Utils
+import org.apache.spark.storage.ShuffleBlockId
 
 /**
  * Map-side shuffle writer implementing ShuffleWriter[K,V] trait with streaming buffer management.
@@ -292,8 +291,11 @@ private[spark] class StreamingShuffleWriter[K, V](
   private def checkBufferUtilizationAndSpill(): Unit = {
     val utilizationPercent = memorySpillManager.getBufferUtilizationPercent
     
-    // Update metrics
-    writeMetrics.asInstanceOf[ShuffleWriteMetrics].incBufferUtilization(utilizationPercent)
+    // Update metrics (safely cast to concrete type for streaming-specific metrics)
+    writeMetrics match {
+      case metrics: ShuffleWriteMetrics => metrics.incBufferUtilization(utilizationPercent)
+      case _ => // Reporter doesn't support streaming metrics
+    }
     
     // If utilization high, get partitions to spill from spill manager
     if (utilizationPercent >= 80) {
@@ -498,8 +500,11 @@ private[spark] class StreamingShuffleWriter[K, V](
       // Mark partition as spilled
       spilledPartitions += partitionId
       
-      // Update spill metrics
-      writeMetrics.asInstanceOf[ShuffleWriteMetrics].incSpillCount(1)
+      // Update spill metrics (safely cast to concrete type for streaming-specific metrics)
+      writeMetrics match {
+        case metrics: ShuffleWriteMetrics => metrics.incSpillCount(1)
+        case _ => // Reporter doesn't support streaming metrics
+      }
       
       // Clear buffer for potential reuse
       buffer.clear()
