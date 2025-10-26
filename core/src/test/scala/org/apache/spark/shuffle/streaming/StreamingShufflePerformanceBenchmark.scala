@@ -20,8 +20,7 @@ package org.apache.spark.shuffle.streaming
 import scala.util.Random
 
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
-import org.apache.spark.executor.ShuffleWriteMetrics
+import org.apache.spark.benchmark.BenchmarkBase
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 
@@ -94,9 +93,13 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     logInfo("Starting StreamingShufflePerformanceBenchmark suite")
     
+    // Variables to store results outside runBenchmark blocks
+    var baselineResults: BenchmarkResults = null
+    var streamingResults: BenchmarkResults = null
+    
     // Run baseline benchmark for sort-based shuffle
-    val baselineResults = runBenchmark("Baseline: Sort-Based Shuffle GroupByKey") {
-      runGroupByKeyBenchmark(
+    runBenchmark("Baseline: Sort-Based Shuffle GroupByKey") {
+      baselineResults = runGroupByKeyBenchmark(
         shuffleManager = "sort",
         benchmarkName = "Sort-Based Shuffle",
         isBaseline = true
@@ -104,8 +107,8 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
     }
     
     // Run streaming shuffle benchmark
-    val streamingResults = runBenchmark("Streaming: Streaming Shuffle GroupByKey") {
-      runGroupByKeyBenchmark(
+    runBenchmark("Streaming: Streaming Shuffle GroupByKey") {
+      streamingResults = runGroupByKeyBenchmark(
         shuffleManager = "streaming",
         benchmarkName = "Streaming Shuffle",
         isBaseline = false
@@ -490,14 +493,4 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       bytesWritten: Long,
       bytesStreamed: Long,
       recordsWritten: Long)
-
-  /**
-   * Main entry point for running benchmark as standalone application.
-   * Delegates to runBenchmarkSuite for actual benchmark execution.
-   *
-   * @param args Command line arguments (unused)
-   */
-  def main(args: Array[String]): Unit = {
-    runBenchmarkSuite(args)
-  }
 }
