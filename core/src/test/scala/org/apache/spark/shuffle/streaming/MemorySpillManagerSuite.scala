@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable
 
-import com.codahale.metrics.Counter
 import org.mockito.{ArgumentMatchers => MockitoArgs, Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
 import org.mockito.Mockito._
@@ -32,7 +31,7 @@ import org.scalatest.matchers.must.Matchers
 import org.apache.spark.{SparkConf, SparkFunSuite}
 import org.apache.spark.internal.config._
 import org.apache.spark.memory.{MemoryManager, MemoryMode}
-import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
+import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.storage.{BlockId, BlockManager, ShuffleDataBlockId, StorageLevel}
 import org.apache.spark.util.io.ChunkedByteBuffer
 
@@ -102,7 +101,9 @@ class MemorySpillManagerSuite
     spillManager.startMonitoring()
     Thread.sleep(50)
 
-    val threadCount = threads.toArray.count { t =>
+    // Get fresh thread snapshot
+    val threadsAfterSecondStart = Thread.getAllStackTraces.keySet()
+    val threadCount = threadsAfterSecondStart.toArray.count { t =>
       val thread = t.asInstanceOf[Thread]
       thread.getName.contains("streaming-shuffle-spill-monitor")
     }
