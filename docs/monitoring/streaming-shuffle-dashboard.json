@@ -1,0 +1,901 @@
+{
+  "dashboard": {
+    "title": "Streaming Shuffle Monitoring",
+    "description": "Operational monitoring for Apache Spark Streaming Shuffle performance and health",
+    "tags": [
+      "spark",
+      "shuffle",
+      "streaming",
+      "performance"
+    ],
+    "timezone": "browser",
+    "editable": true,
+    "graphTooltip": 1,
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m"
+      ]
+    },
+    "refresh": "10s",
+    "schemaVersion": 38,
+    "version": 1,
+    "templating": {
+      "list": [
+        {
+          "name": "datasource",
+          "type": "datasource",
+          "query": "prometheus",
+          "current": {
+            "text": "Prometheus",
+            "value": "Prometheus"
+          },
+          "hide": 0,
+          "includeAll": false,
+          "multi": false,
+          "options": [],
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false
+        },
+        {
+          "name": "shuffle_id",
+          "type": "query",
+          "datasource": "${datasource}",
+          "query": "label_values(shuffle_streaming_buffer_utilization_percent, shuffle_id)",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": 0,
+          "includeAll": true,
+          "multi": true,
+          "options": [],
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1
+        },
+        {
+          "name": "executor_id",
+          "type": "query",
+          "datasource": "${datasource}",
+          "query": "label_values(shuffle_streaming_buffer_utilization_percent{shuffle_id=~\"$shuffle_id\"}, executor_id)",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": 0,
+          "includeAll": true,
+          "multi": true,
+          "options": [],
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Buffer Utilization Gauge",
+        "type": "gauge",
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_buffer_utilization_percent{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "green"
+                },
+                {
+                  "value": 70,
+                  "color": "yellow"
+                },
+                {
+                  "value": 85,
+                  "color": "red"
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "showThresholdLabels": true,
+          "showThresholdMarkers": true
+        },
+        "alert": {
+          "name": "Buffer Utilization High",
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [85],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "5m",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "Streaming shuffle buffer utilization exceeded 85% for 5 minutes. Risk of spill or memory exhaustion.",
+          "name": "Buffer Utilization High",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 2,
+        "title": "Buffer Allocation Time Series",
+        "type": "graph",
+        "gridPos": {
+          "x": 8,
+          "y": 0,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_buffer_utilization_percent{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "custom": {
+              "fillOpacity": 20,
+              "showPoints": "never",
+              "lineWidth": 2
+            }
+          }
+        },
+        "options": {
+          "tooltip": {
+            "mode": "multi",
+            "sort": "none"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Memory Pool Stats",
+        "type": "graph",
+        "gridPos": {
+          "x": 16,
+          "y": 0,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_buffer_allocated_bytes{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "Allocated - {{executor_id}}",
+            "refId": "A"
+          },
+          {
+            "expr": "shuffle_streaming_buffer_available_bytes{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "Available - {{executor_id}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes",
+            "custom": {
+              "fillOpacity": 30,
+              "stacking": {
+                "mode": "normal"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Spill Count",
+        "type": "stat",
+        "gridPos": {
+          "x": 0,
+          "y": 8,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_spill_count_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[5m])",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "thresholds": {
+              "mode": "percentage",
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "green"
+                },
+                {
+                  "value": 20,
+                  "color": "red"
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "graphMode": "area",
+          "colorMode": "value"
+        },
+        "alert": {
+          "name": "Spill Rate High",
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [0.20],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "5m",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "Spill rate exceeded 20% threshold. Buffer may be undersized or memory pressure detected.",
+          "name": "Spill Rate High",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 5,
+        "title": "Spill Volume",
+        "type": "graph",
+        "gridPos": {
+          "x": 8,
+          "y": 8,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_spill_bytes_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[5m])",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "Bps",
+            "custom": {
+              "fillOpacity": 20,
+              "lineWidth": 2
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Spill Latency Histogram",
+        "type": "heatmap",
+        "gridPos": {
+          "x": 16,
+          "y": 8,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_spill_latency_seconds{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\",quantile=~\"0.5|0.95|0.99\"}",
+            "legendFormat": "p{{quantile}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Backpressure Events",
+        "type": "bargauge",
+        "gridPos": {
+          "x": 0,
+          "y": 16,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_backpressure_events_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[1m]) * 60",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "events/min",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "green"
+                },
+                {
+                  "value": 10,
+                  "color": "red"
+                }
+              ]
+            }
+          }
+        },
+        "alert": {
+          "name": "Backpressure Frequent",
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [10],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "1m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "5m",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "Backpressure events exceed 10 per minute. Consumer may be overwhelmed or rate limiting misconfigured.",
+          "name": "Backpressure Frequent",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 8,
+        "title": "Consumer vs Producer Rate",
+        "type": "graph",
+        "gridPos": {
+          "x": 8,
+          "y": 16,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_producer_bytes_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[1m])",
+            "legendFormat": "Producer - {{executor_id}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(shuffle_streaming_consumer_bytes_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[1m])",
+            "legendFormat": "Consumer - {{executor_id}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "Bps",
+            "custom": {
+              "lineWidth": 2
+            }
+          }
+        },
+        "yaxes": [
+          {
+            "label": "Bytes/sec",
+            "format": "Bps"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Rate Limiting Incidents",
+        "type": "stat",
+        "gridPos": {
+          "x": 16,
+          "y": 16,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "increase(shuffle_streaming_rate_limit_events_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[1h])",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          }
+        },
+        "options": {
+          "graphMode": "area",
+          "colorMode": "value"
+        }
+      },
+      {
+        "id": 10,
+        "title": "Partial Read Invalidations",
+        "type": "stat",
+        "gridPos": {
+          "x": 0,
+          "y": 24,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_partial_read_invalidations_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "green"
+                },
+                {
+                  "value": 1,
+                  "color": "red"
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background"
+        },
+        "alert": {
+          "name": "Partial Read Invalidation",
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [0],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "diff"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "0m",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "Producer failure detected! Partial read invalidation occurred, triggering upstream recomputation.",
+          "name": "Partial Read Invalidation",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 11,
+        "title": "Checksum Mismatches",
+        "type": "stat",
+        "gridPos": {
+          "x": 8,
+          "y": 24,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_checksum_mismatches_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "green"
+                },
+                {
+                  "value": 1,
+                  "color": "red"
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background"
+        },
+        "alert": {
+          "name": "Checksum Mismatch",
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [0],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "diff"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "0m",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "CRITICAL: Data corruption detected via CRC32C checksum validation failure!",
+          "name": "Checksum Mismatch",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 12,
+        "title": "Connection Timeouts",
+        "type": "graph",
+        "gridPos": {
+          "x": 16,
+          "y": 24,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_connection_timeouts_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[5m])",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "custom": {
+              "lineWidth": 2
+            }
+          }
+        },
+        "alert": {
+          "name": "Connection Timeouts",
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [5],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "10m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "sum"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "5m",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "More than 5 connection timeouts in 10 minutes. Producer failures or network issues detected.",
+          "name": "Connection Timeouts",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 13,
+        "title": "Bytes Streamed Rate",
+        "type": "graph",
+        "gridPos": {
+          "x": 0,
+          "y": 32,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_bytes_streamed_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[1m]) / 1024 / 1024",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "MBs",
+            "custom": {
+              "fillOpacity": 20,
+              "lineWidth": 2
+            }
+          }
+        },
+        "yaxes": [
+          {
+            "label": "MB/sec",
+            "format": "MBs"
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Blocks Transferred Rate",
+        "type": "stat",
+        "gridPos": {
+          "x": 8,
+          "y": 32,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(shuffle_streaming_blocks_transferred_total{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[1m])",
+            "legendFormat": "{{executor_id}}-{{shuffle_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "decimals": 2
+          }
+        },
+        "options": {
+          "graphMode": "area",
+          "colorMode": "value"
+        }
+      },
+      {
+        "id": 15,
+        "title": "Network Bandwidth Utilization",
+        "type": "gauge",
+        "gridPos": {
+          "x": 16,
+          "y": 32,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_network_utilization_percent{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}",
+            "legendFormat": "{{executor_id}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "value": 0,
+                  "color": "green"
+                },
+                {
+                  "value": 70,
+                  "color": "yellow"
+                },
+                {
+                  "value": 90,
+                  "color": "red"
+                }
+              ]
+            }
+          }
+        },
+        "options": {
+          "showThresholdLabels": true,
+          "showThresholdMarkers": true
+        }
+      },
+      {
+        "id": 16,
+        "title": "Block Stream Latency",
+        "type": "heatmap",
+        "gridPos": {
+          "x": 0,
+          "y": 40,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_block_stream_latency_seconds{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\",quantile=~\"0.5|0.95|0.99|1.0\"}",
+            "legendFormat": "p{{quantile}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "options": {
+          "calculate": true,
+          "cellGap": 2,
+          "color": {
+            "mode": "spectrum",
+            "scheme": "Spectral"
+          }
+        }
+      },
+      {
+        "id": 17,
+        "title": "Acknowledgment Latency",
+        "type": "graph",
+        "gridPos": {
+          "x": 8,
+          "y": 40,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "shuffle_streaming_acknowledgment_latency_seconds{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\",quantile=\"0.5\"}",
+            "legendFormat": "p50",
+            "refId": "A"
+          },
+          {
+            "expr": "shuffle_streaming_acknowledgment_latency_seconds{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\",quantile=\"0.95\"}",
+            "legendFormat": "p95",
+            "refId": "B"
+          },
+          {
+            "expr": "shuffle_streaming_acknowledgment_latency_seconds{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\",quantile=\"0.99\"}",
+            "legendFormat": "p99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": {
+              "lineWidth": 2
+            }
+          }
+        }
+      },
+      {
+        "id": 18,
+        "title": "End-to-End Shuffle Latency",
+        "type": "histogram",
+        "gridPos": {
+          "x": 16,
+          "y": 40,
+          "w": 8,
+          "h": 8
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(shuffle_streaming_total_latency_seconds_bucket{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[5m]))",
+            "legendFormat": "p50",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(shuffle_streaming_total_latency_seconds_bucket{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[5m]))",
+            "legendFormat": "p95",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(shuffle_streaming_total_latency_seconds_bucket{shuffle_id=~\"$shuffle_id\",executor_id=~\"$executor_id\"}[5m]))",
+            "legendFormat": "p99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      }
+    ],
+    "annotations": {
+      "list": [
+        {
+          "datasource": "${datasource}",
+          "enable": true,
+          "expr": "ALERTS{alertname=~\"BufferUtilizationHigh|SpillRateHigh|BackpressureFrequent|PartialReadInvalidation|ChecksumMismatch|ConnectionTimeouts\"}",
+          "iconColor": "red",
+          "name": "Streaming Shuffle Alerts",
+          "step": "60s",
+          "tagKeys": "alertname,severity",
+          "textFormat": "{{alertname}}: {{message}}",
+          "titleFormat": "Alert"
+        }
+      ]
+    }
+  },
+  "overwrite": true,
+  "message": "Streaming Shuffle Monitoring Dashboard v1.0 - Provides comprehensive operational visibility into Apache Spark streaming shuffle performance and health"
+}
