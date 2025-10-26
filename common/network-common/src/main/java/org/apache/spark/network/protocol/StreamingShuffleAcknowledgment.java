@@ -24,7 +24,7 @@ import io.netty.buffer.ByteBuf;
 /**
  * Consumer acknowledgment message for streaming shuffle buffer reclamation.
  * Supports partial and complete acknowledgments.
- * 
+ *
  * This message is sent by shuffle consumers to producers to indicate how much
  * data has been successfully consumed and processed. Producers use this information
  * to reclaim buffer memory and manage backpressure in the streaming shuffle protocol.
@@ -32,16 +32,16 @@ import io.netty.buffer.ByteBuf;
 public final class StreamingShuffleAcknowledgment extends AbstractMessage {
   /** The shuffle ID this acknowledgment is for. */
   public final long shuffleId;
-  
+
   /** The map task ID (producer) this acknowledgment is for. */
   public final int mapId;
-  
+
   /** The partition ID this acknowledgment is for. */
   public final int partitionId;
-  
+
   /** The offset up to which data has been consumed (in bytes). */
   public final long consumedOffset;
-  
+
   /** Whether this is a complete acknowledgment (true) or partial (false). */
   public final boolean complete;
 
@@ -100,7 +100,8 @@ public final class StreamingShuffleAcknowledgment extends AbstractMessage {
     int partitionId = buf.readInt();
     long consumedOffset = buf.readLong();
     boolean complete = buf.readBoolean();
-    return new StreamingShuffleAcknowledgment(shuffleId, mapId, partitionId, consumedOffset, complete);
+    return new StreamingShuffleAcknowledgment(
+        shuffleId, mapId, partitionId, consumedOffset, complete);
   }
 
   @Override

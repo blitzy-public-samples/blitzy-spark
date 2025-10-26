@@ -102,7 +102,7 @@ public final class StreamingShuffleHeartbeat extends AbstractMessage {
 
   @Override
   public String toString() {
-    return "StreamingShuffleHeartbeat[consumerId=" + consumerId + 
+    return "StreamingShuffleHeartbeat[consumerId=" + consumerId +
            ",timestamp=" + timestamp + "]";
   }
 }

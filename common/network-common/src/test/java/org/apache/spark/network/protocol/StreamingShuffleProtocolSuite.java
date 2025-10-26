@@ -122,7 +122,8 @@ public class StreamingShuffleProtocolSuite {
     buf1.release();
 
     // Test with timestamp = Long.MAX_VALUE
-    StreamingShuffleHeartbeat heartbeat2 = new StreamingShuffleHeartbeat(consumerId, Long.MAX_VALUE);
+    StreamingShuffleHeartbeat heartbeat2 =
+        new StreamingShuffleHeartbeat(consumerId, Long.MAX_VALUE);
     ByteBuf buf2 = Unpooled.buffer(heartbeat2.encodedLength());
     heartbeat2.encode(buf2);
     StreamingShuffleHeartbeat decoded2 = StreamingShuffleHeartbeat.decode(buf2);
@@ -146,7 +147,7 @@ public class StreamingShuffleProtocolSuite {
   public void testStreamingShuffleAcknowledgmentEncodedLength() {
     StreamingShuffleAcknowledgment ack = new StreamingShuffleAcknowledgment(
         1L, 2, 3, 4L, true);
-    
+
     // Verify encoded length is exactly 25 bytes (8+4+4+8+1)
     assertEquals(25, ack.encodedLength());
 
@@ -338,7 +339,8 @@ public class StreamingShuffleProtocolSuite {
     assertTrue(!heartbeat1.equals(null)); // Changed from assertFalse to assertTrue(!...)
 
     // Test equals() with different type
-    assertTrue(!heartbeat1.equals("not a heartbeat")); // Changed from assertFalse to assertTrue(!...)
+    // Changed from assertFalse to assertTrue(!...)
+    assertTrue(!heartbeat1.equals("not a heartbeat"));
   }
 
   /**
