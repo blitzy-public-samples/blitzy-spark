@@ -47,6 +47,7 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
   private[executor] val _remoteReqsDuration = new LongAccumulator
   private[executor] val _remoteMergedReqsDuration = new LongAccumulator
   private[executor] val _partialReadInvalidations = new LongAccumulator
+  private[executor] val _checksumMismatchCount = new LongAccumulator
 
   /**
    * Number of remote blocks fetched in this shuffle by this task.
@@ -154,6 +155,13 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
    */
   def partialReadInvalidations: Long = _partialReadInvalidations.sum
 
+  /**
+   * Number of checksum mismatches detected during streaming shuffle block transfers.
+   * This tracks data corruption incidents requiring block retransmission or upstream
+   * recomputation to ensure zero data loss guarantee.
+   */
+  def checksumMismatchCount: Long = _checksumMismatchCount.sum
+
   private[spark] def incRemoteBlocksFetched(v: Long): Unit = _remoteBlocksFetched.add(v)
   private[spark] def incLocalBlocksFetched(v: Long): Unit = _localBlocksFetched.add(v)
   private[spark] def incRemoteBytesRead(v: Long): Unit = _remoteBytesRead.add(v)
@@ -174,6 +182,7 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
   private[spark] def incRemoteReqsDuration(v: Long): Unit = _remoteReqsDuration.add(v)
   private[spark] def incRemoteMergedReqsDuration(v: Long): Unit = _remoteMergedReqsDuration.add(v)
   private[spark] def incPartialReadInvalidations(v: Long): Unit = _partialReadInvalidations.add(v)
+  private[spark] def incChecksumMismatchCount(v: Long): Unit = _checksumMismatchCount.add(v)
 
   private[spark] def setRemoteBlocksFetched(v: Int): Unit = _remoteBlocksFetched.setValue(v)
   private[spark] def setLocalBlocksFetched(v: Int): Unit = _localBlocksFetched.setValue(v)
@@ -203,6 +212,8 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
     _remoteMergedReqsDuration.setValue(v)
   private[spark] def setPartialReadInvalidations(v: Long): Unit = 
     _partialReadInvalidations.setValue(v)
+  private[spark] def setChecksumMismatchCount(v: Long): Unit = 
+    _checksumMismatchCount.setValue(v)
 
   /**
    * Resets the value of the current metrics (`this`) and merges all the independent
@@ -227,6 +238,7 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
     _remoteReqsDuration.setValue(0)
     _remoteMergedReqsDuration.setValue(0)
     _partialReadInvalidations.setValue(0)
+    _checksumMismatchCount.setValue(0)
     metrics.foreach { metric =>
       _remoteBlocksFetched.add(metric.remoteBlocksFetched)
       _localBlocksFetched.add(metric.localBlocksFetched)
@@ -293,6 +305,8 @@ private[spark] class TempShuffleReadMetrics extends ShuffleReadMetricsReporter {
   override def incLocalMergedBytesRead(v: Long): Unit = _localMergedBytesRead += v
   override def incRemoteReqsDuration(v: Long): Unit = _remoteReqsDuration += v
   override def incRemoteMergedReqsDuration(v: Long): Unit = _remoteMergedReqsDuration += v
+  override def incPartialReadInvalidations(v: Long): Unit = {} // No-op for temp metrics
+  override def incChecksumMismatchCount(v: Long): Unit = {} // No-op for temp metrics
 
   def remoteBlocksFetched: Long = _remoteBlocksFetched
   def localBlocksFetched: Long = _localBlocksFetched
