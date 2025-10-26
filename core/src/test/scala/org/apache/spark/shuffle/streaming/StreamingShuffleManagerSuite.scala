@@ -17,14 +17,13 @@
 
 package org.apache.spark.shuffle.streaming
 
-import org.mockito.Mockito.{mock, when}
+import org.mockito.Mockito.mock
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.scalatest.matchers.must.Matchers
 
 import org.apache.spark._
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer, Serializer}
-import org.apache.spark.shuffle.ShuffleWriter
 
 /**
  * Comprehensive unit test suite for StreamingShuffleManager validating shuffle registration,
@@ -40,8 +39,9 @@ import org.apache.spark.shuffle.ShuffleWriter
  * - Resource cleanup: unregisterShuffle and stop() proper cleanup
  *
  * Follows patterns from SortShuffleManagerSuite with RuntimeExceptionAnswer for mock validation.
+ * Extends LocalSparkContext for automatic SparkContext lifecycle management.
  */
-class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
+class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext with Matchers {
 
   private def doReturn(value: Any) = org.mockito.Mockito.doReturn(value, Seq.empty: _*)
 
@@ -123,8 +123,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -154,8 +152,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -197,8 +193,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -229,8 +223,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -261,8 +253,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -293,8 +283,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -325,8 +313,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -362,8 +348,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -400,8 +384,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -436,8 +418,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -476,8 +456,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -517,8 +495,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -562,8 +538,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -608,8 +582,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -634,8 +606,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -678,8 +648,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -717,8 +685,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -757,8 +723,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -779,8 +743,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -824,9 +786,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
       // Verify all shuffles were cleaned up
       manager.activeShuffles.isEmpty mustBe true
-      
-      sc.stop()
-      sc = null
     }
   }
 
@@ -840,15 +799,9 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
     
-    try {
-      // Stop multiple times should not cause errors
-      manager.stop()
-      manager.stop() // Second call should be safe
-      
-    } finally {
-      sc.stop()
-      sc = null
-    }
+    // Stop multiple times should not cause errors
+    manager.stop()
+    manager.stop() // Second call should be safe
   }
 
   test("buffer size calculation respects configuration") {
@@ -891,8 +844,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
         
       } finally {
         manager.stop()
-        sc.stop()
-        sc = null
       }
     }
   }
@@ -913,8 +864,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -964,8 +913,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -1001,8 +948,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 
@@ -1052,9 +997,6 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers {
       
     } finally {
       manager.stop()
-      sc.stop()
-      sc = null
     }
   }
 }
-
