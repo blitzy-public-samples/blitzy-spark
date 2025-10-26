@@ -84,7 +84,8 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
 
   // Track active streaming shuffles for monitoring and resource management
   // Maps shuffle ID to StreamingShuffleContext containing metrics, protocols, and resources
-  private[this] val activeShuffles = 
+  // Accessible to tests within streaming package for validation per Section 0.7
+  private[streaming] val activeShuffles = 
     new ConcurrentHashMap[Int, StreamingShuffleContext]()
 
   // Configuration parameters from Section 0.2

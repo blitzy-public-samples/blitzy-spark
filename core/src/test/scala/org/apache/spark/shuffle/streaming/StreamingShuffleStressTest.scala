@@ -328,14 +328,11 @@ class StreamingShuffleStressTest extends SparkFunSuite with Matchers with LocalS
     val completedJobs = new AtomicLong(0)
     val failedJobs = new AtomicLong(0)
     val injectedFailures = new AtomicLong(0)
-
-    // Track initial read metrics to measure partial invalidations
-    val initialReadMetrics = sc.env.executorMetrics
+    val numRecords = 100000 // Define in test scope for failure rate calculation
 
     (1 to totalJobs).foreach { jobIndex =>
       try {
-        // Create dataset
-        val numRecords = 100000
+        // Create dataset using numRecords from test scope
         val rdd = sc.parallelize(1 to numRecords, NUM_PARTITIONS).map { i =>
           // Inject random failures at 1% rate during map phase
           if (Random.nextDouble() < TASK_FAILURE_RATE) {
