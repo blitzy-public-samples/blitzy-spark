@@ -142,6 +142,11 @@ private[spark] class BackpressureProtocol(
    * @param numBytes Number of bytes to send (tokens to acquire)
    */
   def enforceRateLimit(numBytes: Long): Unit = {
+    // Handle zero-byte requests immediately without rate limiting
+    if (numBytes <= 0) {
+      return
+    }
+    
     val startTime = System.nanoTime()
     val acquired = tokenBucket.tryAcquire(numBytes, timeout = 1000)
     

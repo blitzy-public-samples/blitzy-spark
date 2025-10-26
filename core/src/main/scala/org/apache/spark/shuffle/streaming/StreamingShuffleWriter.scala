@@ -278,6 +278,13 @@ private[spark] class StreamingShuffleWriter[K, V](
       memorySpillManager.updatePartitionAccessTime(partitionId)
       
     } catch {
+      case e: java.nio.BufferOverflowException =>
+        // Buffer full - stream current contents and retry write
+        logDebug(s"Buffer overflow for partition $partitionId, streaming and retrying")
+        buffer.position(startPosition) // Reset to position before failed write
+        streamPartitionData(partitionId)
+        // Retry write after streaming
+        writeRecordToPartition(partitionId, key, value)
       case e: Exception =>
         logError(s"Error serializing record for partition $partitionId", e)
         throw e
