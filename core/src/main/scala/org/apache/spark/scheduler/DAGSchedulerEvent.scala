@@ -145,6 +145,6 @@ private[scheduler] case class ShufflePushCompleted(
  */
 private[scheduler] case class StreamingShufflePartialReadInvalidated(
     shuffleId: Int,
-    mapId: Long,
+    mapId: Int,
     bmAddress: BlockManagerId)
   extends DAGSchedulerEvent
