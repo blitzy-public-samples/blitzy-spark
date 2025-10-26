@@ -22,11 +22,11 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.immutable.Seq
+import scala.jdk.CollectionConverters._
 
 import com.codahale.metrics.Counter
 import org.mockito.{Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
-import org.mockito.Mockito._
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.matchers.must.Matchers
 
@@ -213,7 +213,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
   test("enforceRateLimit allows transfer when tokens available") {
     // Configure with specific bandwidth limit
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(100)) // 100 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 100) // 100 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -235,7 +235,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
   test("enforceRateLimit increments backpressure metrics when tokens exhausted") {
     // Configure with very low bandwidth limit to trigger backpressure
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(1)) // 1 MB/s (very low)
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 1) // 1 MB/s (very low)
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -275,7 +275,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
   test("enforceRateLimit token bucket refills over time") {
     // Configure with moderate bandwidth
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(10)) // 10 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 10) // 10 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -567,7 +567,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
   test("concurrent enforceRateLimit calls handle token contention") {
     // Configure with limited bandwidth
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(50)) // 50 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 50) // 50 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -714,7 +714,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
 
   test("getTokenBucketStats returns valid statistics") {
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(100)) // 100 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 100) // 100 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -732,7 +732,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
 
   test("getTokenBucketStats reflects token consumption") {
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(10)) // 10 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 10) // 10 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -778,7 +778,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
 
   test("backpressure metrics increment on rate limiting") {
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(1)) // Very low: 1 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 1) // Very low: 1 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -798,7 +798,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
 
   test("backpressure metrics track multiple blocking events") {
     val confWithLimit = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(1)) // Very low: 1 MB/s
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, 1) // Very low: 1 MB/s
     val metrics = new Counter()
     val protocolWithLimit = new BackpressureProtocol(confWithLimit, metrics)
     
@@ -912,7 +912,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with BeforeA
   test("configuration with custom bandwidth limit") {
     val customLimit = 250 // 250 MB/s
     val confCustom = new SparkConf()
-      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, Some(customLimit))
+      .set(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS, customLimit)
     val metrics = new Counter()
     val protocolCustom = new BackpressureProtocol(confCustom, metrics)
     
