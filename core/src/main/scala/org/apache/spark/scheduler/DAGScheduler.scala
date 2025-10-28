@@ -2732,6 +2732,62 @@ private[spark] class DAGScheduler(
     }
   }
 
+  /**
+   * Handles streaming shuffle partial read invalidation events.
+   * When a streaming shuffle consumer detects producer failure (via timeout),
+   * this handler invalidates the failed producer's map output and triggers
+   * upstream recomputation to ensure zero data loss.
+   *
+   * @param shuffleId The shuffle ID where the failure occurred
+   * @param mapId The map task ID of the failed producer
+   * @param bmAddress The BlockManagerId of the failed producer executor
+   */
+  private[scheduler] def handleStreamingShufflePartialReadInvalidated(
+      shuffleId: Int,
+      mapId: Long,
+      bmAddress: BlockManagerId): Unit = {
+    // Invalidate map output for failed producer
+    mapOutputTracker.unregisterMapOutput(shuffleId, mapId.toInt, bmAddress)
+
+    // Find the map stage that produced this shuffle
+    shuffleIdToMapStage.get(shuffleId) match {
+      case Some(mapStage) =>
+        logInfo(log"Streaming shuffle producer failure detected for shuffle " +
+          log"${MDC(SHUFFLE_ID, shuffleId)}, map ${MDC(MAP_ID, mapId)} " +
+          log"at ${MDC(BLOCK_MANAGER_ID, bmAddress)}")
+
+        // If the failed map stage is still running, mark it as failed to trigger resubmission
+        if (runningStages.contains(mapStage)) {
+          logInfo(log"Marking ${MDC(STAGE, mapStage)} " +
+            log"(${MDC(STAGE_NAME, mapStage.name)}) as failed due to " +
+            log"streaming shuffle producer failure from " +
+            log"${MDC(BLOCK_MANAGER_ID, bmAddress)}")
+
+          // Mark the stage as failed with retry enabled
+          markStageAsFinished(
+            mapStage,
+            errorMessage = Some(s"Streaming shuffle producer failure at $bmAddress for map $mapId"),
+            willRetry = true
+          )
+
+          // Add to failed stages for resubmission
+          failedStages += mapStage
+
+          // Clear cache locations to force recomputation
+          clearCacheLocs()
+
+          // Post event to trigger resubmission of failed stages
+          eventProcessLoop.post(ResubmitFailedStages)
+        } else {
+          logDebug(log"Received streaming shuffle failure for ${MDC(STAGE, mapStage)}, " +
+            log"but it's no longer running")
+        }
+
+      case None =>
+        logWarning(log"Streaming shuffle failure for unknown shuffle ${MDC(SHUFFLE_ID, shuffleId)}")
+    }
+  }
+
   private def handleResubmittedFailure(task: Task[_], stage: Stage): Unit = {
               logInfo(log"Resubmitted ${MDC(TASK_NAME, task)}, so marking it as still running.")
     stage match {
@@ -3270,6 +3326,9 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
 
     case ShufflePushCompleted(shuffleId, shuffleMergeId, mapIndex) =>
       dagScheduler.handleShufflePushCompleted(shuffleId, shuffleMergeId, mapIndex)
+
+    case StreamingShufflePartialReadInvalidated(shuffleId, mapId, bmAddress) =>
+      dagScheduler.handleStreamingShufflePartialReadInvalidated(shuffleId, mapId, bmAddress)
   }
 
   override def onError(e: Throwable): Unit = {

@@ -23,6 +23,7 @@ import scala.concurrent.Promise
 
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
+import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.{AccumulatorV2, CallSite}
 
 /**
@@ -131,4 +132,19 @@ private[scheduler] case class ShuffleMergeFinalized(stage: ShuffleMapStage)
 
 private[scheduler] case class ShufflePushCompleted(
     shuffleId: Int, shuffleMergeId: Int, mapIndex: Int)
+  extends DAGSchedulerEvent
+
+/**
+ * Event triggered when a streaming shuffle reader detects producer failure via connection timeout.
+ * This event initiates partial read invalidation and upstream task recomputation to ensure
+ * zero data loss in streaming shuffle operations.
+ *
+ * @param shuffleId The shuffle ID where the failure occurred
+ * @param mapId The map task ID of the failed producer
+ * @param bmAddress The BlockManagerId of the failed producer executor
+ */
+private[scheduler] case class StreamingShufflePartialReadInvalidated(
+    shuffleId: Int,
+    mapId: Int,
+    bmAddress: BlockManagerId)
   extends DAGSchedulerEvent

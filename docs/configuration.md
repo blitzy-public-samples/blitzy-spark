@@ -4180,3 +4180,108 @@ Push-based shuffle helps improve the reliability and performance of spark shuffl
   <td>3.3.0</td>
 </tr>
 </table>
+
+# Streaming Shuffle
+
+Streaming shuffle is a new shuffle implementation in Apache Spark that eliminates shuffle materialization latency by streaming data directly from map tasks to reduce tasks without full disk writes. When enabled, shuffle data flows through memory buffers with automatic spill to disk when configured thresholds are exceeded, resulting in 30-50% latency reduction for shuffle-heavy workloads (typically those with 10GB+ data and 100+ partitions).
+
+Unlike the traditional sort-based shuffle that fully materializes shuffle data to disk before reduce tasks can begin processing, streaming shuffle allows reduce tasks to start consuming data as soon as map tasks begin producing it. This reduces end-to-end job latency and improves resource utilization.
+
+<p><b>Key Benefits:</b></p>
+<ul>
+  <li>30-50% latency reduction for shuffle-heavy workloads</li>
+  <li>Memory-mapped I/O pipeline with configurable buffer sizes</li>
+  <li>Automatic backpressure protocol prevents memory exhaustion</li>
+  <li>Graceful degradation with automatic disk spill</li>
+  <li>Zero data loss guarantee with checksum validation</li>
+  <li>Automatic fallback to sort-based shuffle when conditions aren't met</li>
+</ul>
+
+<p><b>Important Notes:</b></p>
+<ul>
+  <li>Streaming shuffle is opt-in via configuration and disabled by default</li>
+  <li>Requires <code>spark.shuffle.manager</code> to be set to <code>"streaming"</code></li>
+  <li>Memory requirements: Default configuration uses 20% of executor memory for shuffle buffers</li>
+  <li>Automatic fallback to sort-based shuffle occurs when memory pressure is detected or when streaming conditions are not met</li>
+  <li>For detailed architecture and tuning guidance, see <code>docs/streaming-shuffle-architecture.md</code> and <code>docs/streaming-shuffle-tuning.md</code></li>
+</ul>
+
+## Streaming Shuffle Configuration
+
+<table class="spark-config">
+<thead><tr><th>Property Name</th><th>Default</th><th>Meaning</th><th>Since Version</th></tr></thead>
+<tr>
+  <td><code>spark.shuffle.streaming.enabled</code></td>
+  <td><code>false</code></td>
+  <td>
+    <p>Enables streaming shuffle capability that eliminates shuffle materialization latency by streaming data directly from map tasks to reduce tasks without full disk writes. When enabled, shuffle data flows through memory buffers with automatic spill to disk when thresholds are exceeded.</p>
+    <p>To use streaming shuffle, this configuration must be set to <code>true</code> AND <code>spark.shuffle.manager</code> must be set to <code>"streaming"</code>. When these conditions are met, Spark will attempt to use streaming shuffle for applicable shuffles.</p>
+    <p>The system automatically falls back to sort-based shuffle when conditions aren't met, such as when memory pressure is detected, when consumer throughput is sustained at less than 50% of producer throughput for more than 60 seconds, or when network saturation exceeds 90% of link capacity.</p>
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.bufferSizePercent</code></td>
+  <td><code>20</code></td>
+  <td>
+    <p>Percentage of executor memory allocated for streaming shuffle buffers. The allocated memory is divided across active shuffle partitions. Higher values increase memory usage but reduce the frequency of disk spills, potentially improving performance.</p>
+    <p>Must be between 1 and 50 percent to prevent memory exhaustion. The actual buffer size per partition is calculated as: <code>(executorMemory * bufferSizePercent / 100) / numPartitions</code></p>
+    <p><b>Tuning Guidance:</b></p>
+    <ul>
+      <li>For workloads with many small partitions (&gt;500), consider increasing to 30-40% to reduce spill frequency</li>
+      <li>For workloads with memory-intensive operations, keep at 10-20% to avoid memory pressure</li>
+      <li>Monitor <code>shuffle.streaming.spillCount</code> metric; high spill rates indicate buffer size should be increased</li>
+    </ul>
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.spillThreshold</code></td>
+  <td><code>80</code></td>
+  <td>
+    <p>Buffer utilization percentage that triggers automatic disk spill. When buffer occupancy exceeds this threshold, least-recently-used partitions are evicted to disk to prevent memory exhaustion. The spill operation completes asynchronously while shuffle continues to operate.</p>
+    <p>Must be between 50 and 95 percent. The threshold is monitored at 100-millisecond intervals.</p>
+    <p><b>Tuning Guidance:</b></p>
+    <ul>
+      <li>Lower values (50-70%) provide more headroom but increase spill frequency</li>
+      <li>Higher values (85-95%) minimize spills but increase risk of memory pressure</li>
+      <li>For workloads with unpredictable data skew, use lower thresholds (60-70%)</li>
+      <li>For workloads with uniform data distribution, higher thresholds (85-90%) are safe</li>
+    </ul>
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.maxBandwidthMBps</code></td>
+  <td>(none)</td>
+  <td>
+    <p>Maximum network bandwidth in megabytes per second for streaming shuffle traffic. When set, enforces rate limiting via token bucket algorithm to prevent network saturation. The token bucket refill rate is calculated as: <code>maxBandwidthMBps / numConcurrentShuffles</code></p>
+    <p>When unset, bandwidth is unlimited. This configuration is particularly useful in multi-tenant environments where network bandwidth must be shared across multiple applications, or when shuffle traffic should be throttled to prevent interference with other network-sensitive operations.</p>
+    <p><b>Tuning Guidance:</b></p>
+    <ul>
+      <li>Set to 80% of available network link capacity to leave headroom for other traffic</li>
+      <li>Monitor <code>shuffle.streaming.backpressureEvents</code> metric; frequent events indicate limit is too restrictive</li>
+      <li>In cloud environments, consider EC2 instance network limits when setting this value</li>
+    </ul>
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.debug</code></td>
+  <td><code>false</code></td>
+  <td>
+    <p>Enables verbose logging for streaming shuffle operations. When enabled, detailed log messages are emitted for:</p>
+    <ul>
+      <li>Buffer allocations and memory reclamation</li>
+      <li>Disk spill events with partition selection details</li>
+      <li>Backpressure incidents and rate limiting actions</li>
+      <li>Partial read invalidations on producer failure</li>
+      <li>Checksum validation failures and retransmission requests</li>
+      <li>Automatic fallback triggers to sort-based shuffle</li>
+    </ul>
+    <p><b>Warning:</b> This configuration increases log volume significantly, potentially generating up to 10MB of logs per hour per executor. Use only for troubleshooting and debugging purposes. Performance overhead is typically less than 1% CPU utilization.</p>
+    <p>For production monitoring, prefer using the JMX metrics exposed via <code>StreamingShuffle.*</code> metric sources rather than debug logging.</p>
+  </td>
+  <td>4.1.0</td>
+</tr>
+</table>

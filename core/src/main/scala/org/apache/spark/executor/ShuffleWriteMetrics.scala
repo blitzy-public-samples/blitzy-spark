@@ -32,6 +32,9 @@ class ShuffleWriteMetrics private[spark] () extends ShuffleWriteMetricsReporter 
   private[executor] val _bytesWritten = new LongAccumulator
   private[executor] val _recordsWritten = new LongAccumulator
   private[executor] val _writeTime = new LongAccumulator
+  private[executor] val _bufferUtilizationPercent = new LongAccumulator
+  private[executor] val _spillCount = new LongAccumulator
+  private[executor] val _backpressureEventCount = new LongAccumulator
 
   /**
    * Number of bytes written for the shuffle by this task.
@@ -48,9 +51,33 @@ class ShuffleWriteMetrics private[spark] () extends ShuffleWriteMetricsReporter 
    */
   def writeTime: Long = _writeTime.sum
 
+  /**
+   * Current buffer utilization percentage for streaming shuffle.
+   * Represents the percentage of allocated executor memory buffers currently in use.
+   * This is a gauge metric that is updated in real-time during streaming shuffle operations.
+   */
+  def bufferUtilizationPercent: Long = _bufferUtilizationPercent.sum
+
+  /**
+   * Number of times streaming shuffle buffers were spilled to disk.
+   * Incremented each time the buffer utilization exceeds the configured spill threshold
+   * (default 80%) and data is written to disk to free memory.
+   */
+  def spillCount: Long = _spillCount.sum
+
+  /**
+   * Number of backpressure events during streaming shuffle.
+   * Tracks how many times the consumer could not keep up with producer rate,
+   * triggering flow control mechanisms like rate limiting or additional spilling.
+   */
+  def backpressureEventCount: Long = _backpressureEventCount.sum
+
   private[spark] override def incBytesWritten(v: Long): Unit = _bytesWritten.add(v)
   private[spark] override def incRecordsWritten(v: Long): Unit = _recordsWritten.add(v)
   private[spark] override def incWriteTime(v: Long): Unit = _writeTime.add(v)
+  private[spark] def incBufferUtilization(v: Long): Unit = _bufferUtilizationPercent.setValue(v)
+  private[spark] def incSpillCount(v: Long): Unit = _spillCount.add(v)
+  private[spark] def incBackpressureEvents(v: Long): Unit = _backpressureEventCount.add(v)
   private[spark] override def decBytesWritten(v: Long): Unit = {
     _bytesWritten.setValue(bytesWritten - v)
   }
