@@ -44,11 +44,11 @@ class StreamingShuffleStressTest
       .setAppName("2-hour-stress-test")
 
     sc = new SparkContext(conf)
-    
+
     val shuffleManager = SparkEnv.get.shuffleManager
     assert(shuffleManager.isInstanceOf[StreamingShuffleManager],
       "StreamingShuffleManager should be active for stress test")
-    
+
     logInfo("2-hour continuous workload configuration validated")
   }
 
@@ -61,11 +61,11 @@ class StreamingShuffleStressTest
       .setAppName("concurrent-tasks-stress-test")
 
     sc = new SparkContext(conf)
-    
+
     val shuffleManager = SparkEnv.get.shuffleManager
     assert(shuffleManager.isInstanceOf[StreamingShuffleManager],
       "StreamingShuffleManager should be active for concurrent tasks test")
-    
+
     logInfo("Concurrent tasks stress test configuration validated")
   }
 
@@ -78,11 +78,11 @@ class StreamingShuffleStressTest
       .setAppName("failure-injection-stress-test")
 
     sc = new SparkContext(conf)
-    
+
     val shuffleManager = SparkEnv.get.shuffleManager
     assert(shuffleManager.isInstanceOf[StreamingShuffleManager],
       "StreamingShuffleManager should be active for failure injection test")
-    
+
     logInfo("Failure injection stress test configuration validated")
   }
 
@@ -95,11 +95,11 @@ class StreamingShuffleStressTest
       .setAppName("memory-leak-detection-test")
 
     sc = new SparkContext(conf)
-    
+
     val shuffleManager = SparkEnv.get.shuffleManager
     assert(shuffleManager.isInstanceOf[StreamingShuffleManager],
       "StreamingShuffleManager should be active for memory leak detection")
-    
+
     logInfo("Memory leak detection test configuration validated")
   }
 
@@ -112,11 +112,11 @@ class StreamingShuffleStressTest
       .setAppName("buffer-reclamation-test")
 
     sc = new SparkContext(conf)
-    
+
     val shuffleManager = SparkEnv.get.shuffleManager
     assert(shuffleManager.isInstanceOf[StreamingShuffleManager],
       "StreamingShuffleManager should be active for buffer reclamation test")
-    
+
     logInfo("Buffer reclamation test configuration validated")
   }
 }

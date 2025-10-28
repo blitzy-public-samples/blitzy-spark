@@ -35,8 +35,9 @@ import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleRea
  * to fetch shuffle data directly from map tasks before the entire shuffle is materialized. Key
  * features include:
  *
- * - **In-Progress Block Polling**: Requests partial blocks from producers before shuffle completion,
- *   reducing end-to-end latency by 30-50% for shuffle-heavy workloads (per Section 0.1)
+ * - **In-Progress Block Polling**: Requests partial blocks from producers
+ *   before shuffle completion, reducing end-to-end latency by 30-50% for
+ *   shuffle-heavy workloads (per Section 0.1)
  * - **Producer Failure Detection**: 5-second connection timeout per Section 0.1, triggering
  *   partial read invalidation and upstream recomputation
  * - **Checksum Validation**: CRC32C checksums for every block with retry logic (max 5 attempts)
@@ -145,8 +146,10 @@ private[spark] class StreamingShuffleReader[K, C](
               }
 
               // Deserialize block into iterator
-              val stream = serializerInstance.deserializeStream(block.createInputStream())
-              currentBlockIterator = stream.asKeyValueIterator.asInstanceOf[Iterator[Product2[K, C]]]
+              val stream = serializerInstance.deserializeStream(
+                block.createInputStream())
+              currentBlockIterator =
+                stream.asKeyValueIterator.asInstanceOf[Iterator[Product2[K, C]]]
 
               // Send acknowledgment for buffer reclamation
               sendAcknowledgment(currentMapIndex, currentPartitionId, block.size(), complete = true)
@@ -234,7 +237,7 @@ private[spark] class StreamingShuffleReader[K, C](
         blockId,
         (buffer: ManagedBuffer) => buffer  // Identity transformer to get ManagedBuffer directly
       )
-      
+
       result match {
         case Some(buffer) => buffer
         case None =>

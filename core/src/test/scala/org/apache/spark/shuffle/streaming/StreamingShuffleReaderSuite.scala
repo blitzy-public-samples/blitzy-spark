@@ -82,7 +82,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
     (0 until numMaps).foreach { mapId =>
       val shuffleBlockId = ShuffleBlockId(shuffleId, mapId.toLong, startPartition)
       val nioBuffer = new NioManagedBuffer(ByteBuffer.wrap(byteOutputStream.toByteArray))
-      
+
       when(blockManager.getRemoteBlock[ManagedBuffer](
         meq(shuffleBlockId),
         any()
@@ -137,7 +137,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
       val expectedRecords = (0 until keyValuePairsPerMap).flatMap { i =>
         Seq.fill(numMaps)((i, 2 * i))
       }.sortBy(_._1)
-      
+
       val actualRecordsSorted = records.map(r => (r._1, r._2)).sortBy(_._1)
       assert(actualRecordsSorted === expectedRecords,
         "Records content does not match expected values")
@@ -418,7 +418,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
     when(blockManager.blockManagerId).thenReturn(localBlockManagerId)
 
     val shuffleBlockId = ShuffleBlockId(shuffleId, mapId.toLong, partitionId)
-    
+
     // Fail first 2 attempts, succeed on 3rd
     when(blockManager.getRemoteBlock[ManagedBuffer](meq(shuffleBlockId), any()))
       .thenReturn(None)  // 1st attempt fails
@@ -457,19 +457,19 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
 
     try {
       val startTime = System.currentTimeMillis()
-      
+
       // Should succeed after retries
       val result = reader.fetchBlockWithRetry(mapId, partitionId)
-      
+
       val elapsedTime = System.currentTimeMillis() - startTime
-      
+
       // Verify we got a buffer
       assert(result != null, "Should return a buffer after retries")
       assert(result.size() > 0, "Buffer should contain data")
-      
+
       // Verify at least 2 retries occurred (backoff should add ~200-400ms minimum)
       // Being lenient with timing due to test execution variability
-      assert(elapsedTime >= 100, 
+      assert(elapsedTime >= 100,
         s"Expected some retry delay, but elapsed time was ${elapsedTime}ms")
 
     } finally {
@@ -578,7 +578,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
       serializationStream.writeValue(i * 10)
     }
     serializationStream.close()
-    
+
     val blockSize = byteOutputStream.size()
     val nioBuffer = new NioManagedBuffer(ByteBuffer.wrap(byteOutputStream.toByteArray))
 
@@ -635,10 +635,10 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
       // Verify metrics
       assert(metrics.recordsRead === numRecordsPerMap * numMaps,
         s"Expected recordsRead=${numRecordsPerMap * numMaps}, got ${metrics.recordsRead}")
-      
+
       assert(metrics.remoteBytesRead > 0,
         "remoteBytesRead should be positive")
-      
+
       assert(metrics.remoteBlocksFetched === numMaps,
         s"Expected remoteBlocksFetched=$numMaps, got ${metrics.remoteBlocksFetched}")
 
@@ -669,7 +669,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
 
     // Create specific test data with known key-value pairs
     val expectedData = Seq((1, 10), (2, 20), (3, 30), (4, 40), (5, 50))
-    
+
     val byteOutputStream = new ByteArrayOutputStream()
     val serializationStream = serializer.newInstance().serializeStream(byteOutputStream)
     expectedData.foreach { case (k, v) =>

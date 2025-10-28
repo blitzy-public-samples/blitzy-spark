@@ -93,14 +93,14 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.streaming.bufferSizePercent", "20")
       .set("spark.shuffle.streaming.spillThreshold", "80")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       // KryoSerializer supports object relocation (supportsRelocationOfSerializedObjects = true)
       val kryo = new KryoSerializer(conf)
-      
+
       // Test with 100 partitions (minimum threshold per Section 0.1)
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -109,10 +109,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Should return StreamingShuffleHandle when all conditions met
       handle mustBe a[StreamingShuffleHandle[_, _, _]]
-      
+
       // Test with 150 partitions (above minimum threshold)
       val handle2 = manager.registerShuffle(1, shuffleDep(
         partitioner = new HashPartitioner(150),
@@ -121,9 +121,9 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       handle2 mustBe a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -135,13 +135,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "false")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -149,10 +149,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Should NOT return StreamingShuffleHandle when disabled
       handle must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -164,13 +164,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Test with 50 partitions (below 100 minimum per Section 0.1)
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(50),
@@ -179,10 +179,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Should fall back to sort-based shuffle due to insufficient partitions
       handle must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
       // Test with 99 partitions (just below threshold)
       val handle2 = manager.registerShuffle(1, shuffleDep(
         partitioner = new HashPartitioner(99),
@@ -191,9 +191,9 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       handle2 must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -205,14 +205,14 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       // JavaSerializer does NOT support object relocation (supportsRelocationOfSerializedObjects = false)
       val java = new JavaSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = java,
@@ -220,10 +220,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Should fall back due to serializer not supporting relocation
       handle must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -235,13 +235,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Map-side combine not supported in streaming shuffle v1 per Section 0.9
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -250,10 +250,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = Some(mock(classOf[Aggregator[Any, Any, Any]])),
         mapSideCombine = true
       ))
-      
+
       // Should fall back due to map-side combine requirement
       handle must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -265,13 +265,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Key ordering without aggregator should work per Section 0.9
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -280,10 +280,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Should use streaming shuffle even with key ordering
       handle mustBe a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -295,13 +295,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Aggregator without map-side combine is allowed per Section 0.9
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -310,10 +310,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = Some(mock(classOf[Aggregator[Any, Any, Any]])),
         mapSideCombine = false
       ))
-      
+
       // Should use streaming shuffle with aggregator but no map-side combine
       handle mustBe a[StreamingShuffleHandle[_, _, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -326,13 +326,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.shuffle.streaming.bufferSizePercent", "30")
       .set("spark.executor.memory", "1000m")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -340,7 +340,7 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       )).asInstanceOf[StreamingShuffleHandle[_, _, _]]
-      
+
       // Verify buffer size calculation per Section 0.2:
       // bufferSize = (executorMemory * bufferPercent) / numPartitions
       // 1000MB = 1048576000 bytes
@@ -348,7 +348,7 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       // Per partition = 314572800 / 100 = 3145728 bytes
       handle.bufferSizeBytes must be > 0L
       handle.bufferSizeBytes must be < 10000000L // Reasonable upper bound
-      
+
     } finally {
       manager.stop()
     }
@@ -360,13 +360,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -374,7 +374,7 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Verify active shuffle context was created
       val context = manager.activeShuffles.get(0)
       context must not be null
@@ -384,7 +384,7 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       context.backpressureProtocol must not be null
       context.memorySpillManager must not be null
       context.metricsSource must not be null
-      
+
     } finally {
       manager.stop()
     }
@@ -396,13 +396,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Use only 50 partitions (less than MIN_PARTITIONS_FOR_STREAMING = 100)
       // This should trigger fallback to sort-based shuffle
       val handle = manager.registerShuffle(0, shuffleDep(
@@ -412,14 +412,14 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Should NOT return StreamingShuffleHandle due to fallback
       handle must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
       // Active shuffle context should not be present
       val context = manager.activeShuffles.get(0)
       context mustBe null
-      
+
     } finally {
       manager.stop()
     }
@@ -431,13 +431,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -445,19 +445,19 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       )).asInstanceOf[StreamingShuffleHandle[Any, Any, Any]]
-      
+
       // Create task context for writer creation
       val taskContext = TaskContext.empty()
       val metricsReporter = mock(classOf[org.apache.spark.shuffle.ShuffleWriteMetricsReporter])
-      
+
       // getWriter should return StreamingShuffleWriter for streaming handle
       val writer = manager.getWriter(handle, 0L, taskContext, metricsReporter)
-      
+
       writer mustBe a[StreamingShuffleWriter[_, _]]
-      
+
       // Clean up writer
       writer.stop(success = true)
-      
+
     } finally {
       manager.stop()
     }
@@ -469,13 +469,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = sc.env.shuffleManager.asInstanceOf[StreamingShuffleManager]
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Register with too few partitions to trigger fallback to non-streaming handle
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(50),  // Less than MIN_PARTITIONS_FOR_STREAMING
@@ -484,19 +484,19 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Create task context for writer creation
       val taskContext = TaskContext.empty()
       val metricsReporter = mock(classOf[org.apache.spark.shuffle.ShuffleWriteMetricsReporter])
-      
+
       // getWriter should delegate to fallback manager for non-streaming handle
       val writer = manager.getWriter(handle, 0L, taskContext, metricsReporter)
-      
+
       writer must not be a[StreamingShuffleWriter[_, _]]
-      
+
       // Clean up writer (use success=false since we didn't write anything)
       writer.stop(success = false)
-      
+
     } finally {
       // Manager cleanup handled by SparkContext
     }
@@ -508,13 +508,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -522,11 +522,11 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       )).asInstanceOf[StreamingShuffleHandle[Any, Any, Any]]
-      
+
       // Create task context for reader creation
       val taskContext = TaskContext.empty()
       val metricsReporter = mock(classOf[org.apache.spark.shuffle.ShuffleReadMetricsReporter])
-      
+
       // getReader should return StreamingShuffleReader for streaming handle
       val reader = manager.getReader(
         handle,
@@ -537,9 +537,9 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         taskContext,
         metricsReporter
       )
-      
+
       reader mustBe a[StreamingShuffleReader[_, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -551,13 +551,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "false")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Register with streaming disabled to get non-streaming handle
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -566,11 +566,11 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Create task context for reader creation
       val taskContext = TaskContext.empty()
       val metricsReporter = mock(classOf[org.apache.spark.shuffle.ShuffleReadMetricsReporter])
-      
+
       // getReader should delegate to fallback manager
       val reader = manager.getReader(
         handle,
@@ -581,9 +581,9 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         taskContext,
         metricsReporter
       )
-      
+
       reader must not be a[StreamingShuffleReader[_, _]]
-      
+
     } finally {
       manager.stop()
     }
@@ -595,19 +595,19 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       // Fallback monitoring thread should be started
       // Give it a moment to start
       Thread.sleep(100)
-      
+
       // Verify the monitoring thread was created and is running
       // Note: Cannot directly access private field, but we can verify behavior
       // by checking that no exceptions are thrown during normal operation
-      
+
     } finally {
       manager.stop()
     }
@@ -620,13 +620,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.shuffle.streaming.debug", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -634,22 +634,22 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Get active shuffle context
       val context = manager.activeShuffles.get(0)
-      
+
       // Simulate slow consumer scenario per Section 0.9:
       // Consumer sustained 2x slower than producer for >60 seconds
       context.updateProducerThroughput(2000000.0) // 2 MB/s
       context.updateConsumerThroughput(500000.0)   // 0.5 MB/s (4x slower)
-      
+
       // Wait for slow consumer duration to exceed threshold
       Thread.sleep(100)
-      
+
       // Verify slow consumer duration is being tracked
       val duration = context.getSlowConsumerDurationMs
       duration must be > 0L
-      
+
     } finally {
       manager.stop()
     }
@@ -662,13 +662,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.shuffle.streaming.debug", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -676,17 +676,17 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Get active shuffle context
       val context = manager.activeShuffles.get(0)
-      
+
       // Simulate network saturation per Section 0.9: >90% utilization
       context.updateNetworkUtilization(95.0)
-      
+
       // Verify network utilization is being tracked
       val utilization = context.getNetworkUtilizationPercent
       utilization mustBe 95.0
-      
+
     } finally {
       manager.stop()
     }
@@ -698,13 +698,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -712,19 +712,19 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Verify shuffle context exists
       val contextBefore = manager.activeShuffles.get(0)
       contextBefore must not be null
-      
+
       // Unregister shuffle
       val result = manager.unregisterShuffle(0)
       result mustBe true
-      
+
       // Verify shuffle context was removed
       val contextAfter = manager.activeShuffles.get(0)
       contextAfter mustBe null
-      
+
     } finally {
       manager.stop()
     }
@@ -736,15 +736,15 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       // Unregister non-existent shuffle should not throw exception
       val result = manager.unregisterShuffle(999)
       result mustBe true // Delegates to fallback manager
-      
+
     } finally {
       manager.stop()
     }
@@ -756,13 +756,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Register multiple shuffles
       manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -771,7 +771,7 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       manager.registerShuffle(1, shuffleDep(
         partitioner = new HashPartitioner(150),
         serializer = kryo,
@@ -779,15 +779,15 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Verify shuffles were registered
       manager.activeShuffles.get(0) must not be null
       manager.activeShuffles.get(1) must not be null
-      
+
     } finally {
       // Stop should clean up all resources
       manager.stop()
-      
+
       // Verify all shuffles were cleaned up
       manager.activeShuffles.isEmpty mustBe true
     }
@@ -799,10 +799,10 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     // Stop multiple times should not cause errors
     manager.stop()
     manager.stop() // Second call should be safe
@@ -818,20 +818,20 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       (20, "500m"), // 20% with smaller executor memory
       (20, "2g")    // 20% with larger executor memory
     )
-    
+
     testCases.foreach { case (bufferPercent, executorMemory) =>
       val conf = new SparkConf()
         .set("spark.shuffle.manager", "streaming")
         .set("spark.shuffle.streaming.enabled", "true")
         .set("spark.shuffle.streaming.bufferSizePercent", bufferPercent.toString)
         .set("spark.executor.memory", executorMemory)
-      
+
       sc = new SparkContext("local", "test", conf)
       val manager = new StreamingShuffleManager(conf)
-      
+
       try {
         val kryo = new KryoSerializer(conf)
-        
+
         val handle = manager.registerShuffle(0, shuffleDep(
           partitioner = new HashPartitioner(100),
           serializer = kryo,
@@ -839,13 +839,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
           aggregator = None,
           mapSideCombine = false
         )).asInstanceOf[StreamingShuffleHandle[_, _, _]]
-        
+
         // Verify buffer size is positive and reasonable
         handle.bufferSizeBytes must be > 0L
-        
+
         // Clean up
         manager.unregisterShuffle(0)
-        
+
       } finally {
         manager.stop()
         // Ensure SparkContext is stopped before next iteration
@@ -863,14 +863,14 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       // Verify shuffle block resolver was created
       manager.shuffleBlockResolver must not be null
-      
+
     } finally {
       manager.stop()
     }
@@ -882,13 +882,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -896,30 +896,30 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Get active shuffle context
       val context = manager.activeShuffles.get(0)
-      
+
       // Verify context tracks lifecycle (>= 0 since it might be immediate)
       context.ageMillis must be >= 0L
-      
+
       // Test throughput updates
       context.updateProducerThroughput(1000000.0)
       context.getProducerBytesPerSecond mustBe 1000000.0
-      
+
       context.updateConsumerThroughput(800000.0)
       context.getConsumerBytesPerSecond mustBe 800000.0
-      
+
       // Test network utilization tracking
       context.updateNetworkUtilization(75.0)
       context.getNetworkUtilizationPercent mustBe 75.0
-      
+
       // Test fallback event recording
       context.recordFallbackEvent("Test fallback event")
       val events = context.getFallbackEvents
       events.size mustBe 1
       events.head must include("Test fallback event")
-      
+
     } finally {
       manager.stop()
     }
@@ -931,13 +931,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       val handle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
         serializer = kryo,
@@ -945,16 +945,16 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Get active shuffle context
       val context = manager.activeShuffles.get(0)
-      
+
       // Call cleanup directly
       context.cleanup()
-      
+
       // Cleanup should be idempotent - can be called multiple times
       context.cleanup()
-      
+
     } finally {
       manager.stop()
     }
@@ -971,13 +971,13 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
       .set("spark.shuffle.manager", "streaming")
       .set("spark.shuffle.streaming.enabled", "true")
       .set("spark.executor.memory", "1g")
-    
+
     sc = new SparkContext("local", "test", conf)
     val manager = new StreamingShuffleManager(conf)
-    
+
     try {
       val kryo = new KryoSerializer(conf)
-      
+
       // Register streaming shuffle (100+ partitions, Kryo serializer)
       val streamingHandle = manager.registerShuffle(0, shuffleDep(
         partitioner = new HashPartitioner(100),
@@ -986,7 +986,7 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Register non-streaming shuffle (insufficient partitions)
       val sortHandle = manager.registerShuffle(1, shuffleDep(
         partitioner = new HashPartitioner(50),
@@ -995,15 +995,15 @@ class StreamingShuffleManagerSuite extends SparkFunSuite with LocalSparkContext 
         aggregator = None,
         mapSideCombine = false
       ))
-      
+
       // Verify coexistence: one streaming, one sort-based
       streamingHandle mustBe a[StreamingShuffleHandle[_, _, _]]
       sortHandle must not be a[StreamingShuffleHandle[_, _, _]]
-      
+
       // Both should be registered
       manager.activeShuffles.get(0) must not be null
       manager.activeShuffles.get(1) mustBe null // Sort-based doesn't create context
-      
+
     } finally {
       manager.stop()
     }

@@ -68,10 +68,10 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
   private val NUM_RECORDS = 10000000
   private val VALUE_SIZE = 100 // Characters per value (~100 bytes after serialization)
   private val NUM_PARTITIONS = 100
-  
+
   // Cluster configuration for realistic multi-executor scenario
   private val CLUSTER_MODE = "local-cluster[4,2,2048]" // 4 workers, 2 cores each, 2GB memory
-  
+
   // Performance target thresholds per Agent Action Plan Section 0.7
   private val TARGET_LATENCY_REDUCTION_MIN = 0.30 // 30% minimum
   private val TARGET_LATENCY_REDUCTION_MAX = 0.50 // 50% maximum
@@ -92,11 +92,11 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
    */
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     logInfo("Starting StreamingShufflePerformanceBenchmark suite")
-    
+
     // Variables to store results outside runBenchmark blocks
     var baselineResults: BenchmarkResults = null
     var streamingResults: BenchmarkResults = null
-    
+
     // Run baseline benchmark for sort-based shuffle
     runBenchmark("Baseline: Sort-Based Shuffle GroupByKey") {
       baselineResults = runGroupByKeyBenchmark(
@@ -105,7 +105,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
         isBaseline = true
       )
     }
-    
+
     // Run streaming shuffle benchmark
     runBenchmark("Streaming: Streaming Shuffle GroupByKey") {
       streamingResults = runGroupByKeyBenchmark(
@@ -114,12 +114,12 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
         isBaseline = false
       )
     }
-    
+
     // Run comparison analysis and validation
     runBenchmark("Comparison: Latency and Performance Analysis") {
       compareResults(baselineResults, streamingResults)
     }
-    
+
     logInfo("StreamingShufflePerformanceBenchmark suite completed successfully")
   }
 
@@ -148,9 +148,9 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       shuffleManager: String,
       benchmarkName: String,
       isBaseline: Boolean): BenchmarkResults = {
-    
+
     logInfo(s"Starting $benchmarkName benchmark with shuffle.manager=$shuffleManager")
-    
+
     // Configure SparkContext with specified shuffle manager
     val conf = new SparkConf()
       .setMaster(CLUSTER_MODE)
@@ -161,7 +161,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       .set("spark.local.dir", System.getProperty("java.io.tmpdir"))
       .set("spark.shuffle.spill.compress", "true")
       .set("spark.shuffle.compress", "true")
-    
+
     // Configure streaming shuffle specific parameters if using streaming manager
     if (shuffleManager == "streaming") {
       conf.set("spark.shuffle.streaming.enabled", "true")
@@ -169,13 +169,13 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       conf.set("spark.shuffle.streaming.spillThreshold", "80")
       conf.set("spark.shuffle.streaming.debug", "true")
     }
-    
+
     var sc: SparkContext = null
     try {
       sc = new SparkContext(conf)
-      
+
       logInfo(s"$benchmarkName: Generating 10GB test dataset with $NUM_RECORDS records")
-      
+
       // Generate test dataset: 10 million (key, value) pairs
       // Keys are random integers to ensure distribution across partitions
       // Values are random strings of 100 characters (~100 bytes each)
@@ -185,36 +185,36 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       }
       val dataGenTime = (System.nanoTime() - startDataGen) / 1e9
       logInfo(s"$benchmarkName: Dataset generation completed in ${dataGenTime}s")
-      
+
       // Create RDD with specified partitions and cache for consistent benchmark
       val rdd: RDD[(Int, String)] = sc.parallelize(data, NUM_PARTITIONS).cache()
-      
+
       // Force materialization and caching
       val recordCount = rdd.count()
       require(recordCount == NUM_RECORDS,
         s"Expected $NUM_RECORDS records, got $recordCount")
       logInfo(s"$benchmarkName: RDD materialized with $recordCount records across " +
         s"${rdd.partitions.length} partitions")
-      
+
       // Measure end-to-end latency for groupByKey operation
       logInfo(s"$benchmarkName: Starting groupByKey shuffle operation")
       val startShuffle = System.nanoTime()
-      
+
       // Execute groupByKey to force shuffle
       val grouped = rdd.groupByKey(NUM_PARTITIONS)
-      
+
       // Force execution with count action
       val groupedCount = grouped.count()
-      
+
       val endShuffle = System.nanoTime()
       val shuffleLatencyMs = (endShuffle - startShuffle) / 1e6
-      
+
       logInfo(s"$benchmarkName: Shuffle completed in ${shuffleLatencyMs}ms, " +
         s"produced $groupedCount groups")
-      
+
       // Collect metrics from TaskMetrics and ShuffleMetrics
       val metrics = collectMetrics(sc, shuffleManager)
-      
+
       // Log comprehensive metrics
       logInfo(s"$benchmarkName Metrics:")
       logInfo(s"  Latency: ${shuffleLatencyMs}ms")
@@ -223,7 +223,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       logInfo(s"  Spill Bytes: ${metrics.spillBytes}")
       logInfo(s"  Bytes Written: ${metrics.bytesWritten}")
       logInfo(s"  Records Written: ${metrics.recordsWritten}")
-      
+
       // Calculate derived metrics
       val spillRate = if (metrics.bytesWritten > 0) {
         metrics.spillBytes.toDouble / metrics.bytesWritten.toDouble
@@ -231,7 +231,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
         0.0
       }
       logInfo(s"  Spill Rate: ${spillRate * 100}%")
-      
+
       BenchmarkResults(
         benchmarkName = benchmarkName,
         shuffleManager = shuffleManager,
@@ -244,7 +244,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
         recordsWritten = metrics.recordsWritten,
         spillRate = spillRate
       )
-      
+
     } finally {
       // Cleanup resources
       if (sc != null) {
@@ -276,15 +276,15 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
   private def collectMetrics(
       sc: SparkContext,
       shuffleManager: String): ShuffleMetrics = {
-    
+
     // Access StatusTracker for task metrics
     val statusTracker = sc.statusTracker
-    
+
     // Get all completed stages
     val stageIds = statusTracker.getJobIdsForGroup(null).flatMap { jobId =>
       statusTracker.getJobInfo(jobId).map(_.stageIds).getOrElse(Array.empty)
     }
-    
+
     // Aggregate metrics across all tasks in all stages
     var totalPeakMemoryBytes = 0L
     var totalSpillCount = 0L
@@ -292,27 +292,27 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
     var totalBytesWritten = 0L
     var totalRecordsWritten = 0L
     var totalBytesStreamed = 0L
-    
+
     stageIds.foreach { stageId =>
       statusTracker.getStageInfo(stageId).foreach { stageInfo =>
         // Peak memory is max across all tasks
         val stagePeakMemory = stageInfo.numTasks * 512L * 1024L * 1024L // Estimate 512MB per task
         totalPeakMemoryBytes = math.max(totalPeakMemoryBytes, stagePeakMemory)
-        
+
         // Note: Detailed task metrics not directly accessible from StatusTracker
         // Using executor storage memory and shuffle metrics as proxies
       }
     }
-    
+
     // Access shuffle metrics from SparkContext's internal metrics
     // For accurate metrics, we use the UI metrics if available
     val listener = sc.listenerBus
-    
+
     // Estimate metrics based on shuffle operation characteristics
     // In production, these would come from actual TaskMetrics collected during execution
     totalBytesWritten = NUM_RECORDS * (4 + VALUE_SIZE) // key (4 bytes) + value (100 bytes)
     totalRecordsWritten = NUM_RECORDS
-    
+
     // For streaming shuffle, bytes streamed should be close to bytes written minus spills
     if (shuffleManager == "streaming") {
       // Streaming shuffle should have minimal spills
@@ -325,9 +325,9 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
       totalSpillCount = 8
       totalBytesStreamed = 0 // Sort-based doesn't stream
     }
-    
+
     val peakMemoryMB = totalPeakMemoryBytes / (1024 * 1024)
-    
+
     ShuffleMetrics(
       peakMemoryMB = peakMemoryMB,
       spillCount = totalSpillCount,
@@ -359,31 +359,31 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
   private def compareResults(
       baseline: BenchmarkResults,
       streaming: BenchmarkResults): Unit = {
-    
+
     logInfo("=" * 80)
     logInfo("PERFORMANCE COMPARISON ANALYSIS")
     logInfo("=" * 80)
-    
+
     // Calculate latency reduction
     val latencyReduction = (baseline.latencyMs - streaming.latencyMs) / baseline.latencyMs
     val latencyReductionPercent = latencyReduction * 100
-    
+
     logInfo(s"Latency Comparison:")
     logInfo(s"  Baseline (Sort):    ${baseline.latencyMs}ms")
     logInfo(s"  Streaming:          ${streaming.latencyMs}ms")
     logInfo(s"  Reduction:          ${latencyReductionPercent}% " +
       s"(${baseline.latencyMs - streaming.latencyMs}ms faster)")
-    
+
     // Calculate memory overhead
     val memoryOverhead = (streaming.peakMemoryMB - baseline.peakMemoryMB).toDouble /
       baseline.peakMemoryMB.toDouble
     val memoryOverheadPercent = memoryOverhead * 100
-    
+
     logInfo(s"Memory Comparison:")
     logInfo(s"  Baseline Peak:      ${baseline.peakMemoryMB}MB")
     logInfo(s"  Streaming Peak:     ${streaming.peakMemoryMB}MB")
     logInfo(s"  Overhead:           ${memoryOverheadPercent}%")
-    
+
     // Compare spill metrics
     logInfo(s"Spill Comparison:")
     logInfo(s"  Baseline Count:     ${baseline.spillCount}")
@@ -392,59 +392,59 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase with Logging {
     logInfo(s"  Streaming Bytes:    ${streaming.spillBytes}")
     logInfo(s"  Baseline Rate:      ${baseline.spillRate * 100}%")
     logInfo(s"  Streaming Rate:     ${streaming.spillRate * 100}%")
-    
+
     // Compare network bandwidth
     val bandwidthImprovement = if (baseline.bytesWritten > 0) {
       streaming.bytesStreamed.toDouble / baseline.bytesWritten.toDouble
     } else {
       0.0
     }
-    
+
     logInfo(s"Network Bandwidth Comparison:")
     logInfo(s"  Baseline Written:   ${baseline.bytesWritten} bytes")
     logInfo(s"  Streaming Streamed: ${streaming.bytesStreamed} bytes")
     logInfo(s"  Efficiency:         ${bandwidthImprovement * 100}%")
-    
+
     logInfo("=" * 80)
     logInfo("VALIDATION: Performance Targets (Agent Action Plan Section 0.7)")
     logInfo("=" * 80)
-    
+
     // Validate Target 1: Latency reduction >= 30%
     val latencyTargetMet = latencyReduction >= TARGET_LATENCY_REDUCTION_MIN
     logInfo(s"Target 1 - Latency Reduction >= 30%:")
     logInfo(s"  Expected: >= ${TARGET_LATENCY_REDUCTION_MIN * 100}%")
     logInfo(s"  Actual:   ${latencyReductionPercent}%")
     logInfo(s"  Status:   ${if (latencyTargetMet) "PASS ✓" else "FAIL ✗"}")
-    
+
     // Validate Target 2: Memory overhead <= 10%
     val memoryTargetMet = memoryOverhead <= MAX_MEMORY_OVERHEAD
     logInfo(s"Target 2 - Memory Overhead <= 10%:")
     logInfo(s"  Expected: <= ${MAX_MEMORY_OVERHEAD * 100}%")
     logInfo(s"  Actual:   ${memoryOverheadPercent}%")
     logInfo(s"  Status:   ${if (memoryTargetMet) "PASS ✓" else "FAIL ✗"}")
-    
+
     // Validate Target 3: Spill rate <= 5%
     val spillTargetMet = streaming.spillRate <= MAX_SPILL_RATE
     logInfo(s"Target 3 - Spill Rate <= 5%:")
     logInfo(s"  Expected: <= ${MAX_SPILL_RATE * 100}%")
     logInfo(s"  Actual:   ${streaming.spillRate * 100}%")
     logInfo(s"  Status:   ${if (spillTargetMet) "PASS ✓" else "FAIL ✗"}")
-    
+
     logInfo("=" * 80)
-    
+
     // Assert all targets met for automated validation
     assert(latencyTargetMet,
       s"Latency reduction target not met: ${latencyReductionPercent}% < " +
       s"${TARGET_LATENCY_REDUCTION_MIN * 100}%")
-    
+
     assert(memoryTargetMet,
       s"Memory overhead target not met: ${memoryOverheadPercent}% > " +
       s"${MAX_MEMORY_OVERHEAD * 100}%")
-    
+
     assert(spillTargetMet,
       s"Spill rate target not met: ${streaming.spillRate * 100}% > " +
       s"${MAX_SPILL_RATE * 100}%")
-    
+
     logInfo("All performance targets validated successfully!")
   }
 

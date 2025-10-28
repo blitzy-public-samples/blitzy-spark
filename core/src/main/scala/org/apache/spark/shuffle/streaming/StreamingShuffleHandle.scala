@@ -34,7 +34,8 @@ import org.apache.spark.shuffle.ShuffleHandle
  * {{{
  *   bufferSizeBytes = (executorMemory * bufferSizePercent) / numPartitions
  * }}}
- * where bufferSizePercent is configurable via spark.shuffle.streaming.bufferSizePercent (default 20%).
+ * where bufferSizePercent is configurable via
+ * spark.shuffle.streaming.bufferSizePercent (default 20%).
  *
  * This handle enables StreamingShuffleWriter to:
  *  - Allocate per-partition memory buffers of the correct size

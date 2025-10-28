@@ -210,9 +210,9 @@ class ShuffleReadMetrics private[spark] () extends Serializable {
   private[spark] def setRemoteReqsDuration(v: Long): Unit = _remoteReqsDuration.setValue(v)
   private[spark] def setRemoteMergedReqsDuration(v: Long): Unit =
     _remoteMergedReqsDuration.setValue(v)
-  private[spark] def setPartialReadInvalidations(v: Long): Unit = 
+  private[spark] def setPartialReadInvalidations(v: Long): Unit =
     _partialReadInvalidations.setValue(v)
-  private[spark] def setChecksumMismatchCount(v: Long): Unit = 
+  private[spark] def setChecksumMismatchCount(v: Long): Unit =
     _checksumMismatchCount.setValue(v)
 
   /**

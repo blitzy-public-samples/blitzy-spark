@@ -85,7 +85,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
   // Track active streaming shuffles for monitoring and resource management
   // Maps shuffle ID to StreamingShuffleContext containing metrics, protocols, and resources
   // Accessible to tests within streaming package for validation per Section 0.7
-  private[streaming] val activeShuffles = 
+  private[streaming] val activeShuffles =
     new ConcurrentHashMap[Int, StreamingShuffleContext]()
 
   // Configuration parameters from Section 0.2
@@ -136,21 +136,21 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
   override def registerShuffle[K, V, C](
       shuffleId: Int,
       dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
-    
+
     if (shouldUseStreaming(dependency)) {
       try {
         // Calculate required buffer size per Section 0.2
         // Note: Actual memory allocation happens on executors during task execution,
         // not during shuffle registration on the driver
         val numPartitions = dependency.partitioner.numPartitions
-        
+
         // Calculate buffer size as percentage of configured executor memory
         // This is a planning calculation - actual allocation happens in StreamingShuffleWriter
         val executorMemoryMB = conf.get("spark.executor.memory", "1g")
         val executorMemoryBytes = org.apache.spark.util.Utils.byteStringAsBytes(executorMemoryMB)
         val totalBufferSize = (executorMemoryBytes * bufferSizePercent) / 100
         val bufferSizePerPartition = totalBufferSize / numPartitions
-        
+
         if (debugMode) {
           logDebug(s"Calculated buffer size for streaming shuffle $shuffleId: " +
             s"executorMemory=$executorMemoryMB, " +
@@ -159,7 +159,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
             s"numPartitions=$numPartitions, " +
             s"bufferSizePerPartition=$bufferSizePerPartition bytes")
         }
-        
+
         // Create streaming shuffle context and protocol instances
         val backpressureMetrics = new Counter()
         val backpressureProtocol = new BackpressureProtocol(conf, backpressureMetrics)
@@ -168,11 +168,11 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
           SparkEnv.get.memoryManager,
           SparkEnv.get.blockManager
         )
-        
+
         // Register metrics source with MetricsSystem
         val metricsSource = new StreamingShuffleMetricsSource(shuffleId)
         SparkEnv.get.metricsSystem.registerSource(metricsSource)
-        
+
         // Create context for resource tracking
         val context = new StreamingShuffleContext(
           shuffleId = shuffleId,
@@ -182,23 +182,23 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
           memorySpillManager = memorySpillManager,
           metricsSource = metricsSource
         )
-        
+
         activeShuffles.put(shuffleId, context)
-        
+
         // Start monitoring for spill manager
         memorySpillManager.startMonitoring()
-        
+
         if (debugMode) {
           logInfo(s"Registered streaming shuffle $shuffleId: " +
             s"numPartitions=$numPartitions, " +
             s"bufferSizePerPartition=$bufferSizePerPartition bytes, " +
             s"totalBufferSize=$totalBufferSize bytes")
         }
-        
+
         // Return StreamingShuffleHandle with calculated buffer size
         // Actual memory allocation will happen in StreamingShuffleWriter on executors
         new StreamingShuffleHandle(shuffleId, bufferSizePerPartition, dependency)
-        
+
       } catch {
         case e: Exception =>
           logError(s"Failed to register streaming shuffle $shuffleId, " +
@@ -249,7 +249,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
       mapId: Long,
       context: TaskContext,
       metrics: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] = {
-    
+
     handle match {
       case streamingHandle: StreamingShuffleHandle[K @unchecked, V @unchecked, _] =>
         // Retrieve streaming shuffle context
@@ -259,7 +259,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
             logDebug(s"Creating StreamingShuffleWriter for shuffle ${handle.shuffleId}, " +
               s"mapId $mapId")
           }
-          
+
           // Instantiate StreamingShuffleWriter with protocols and managers
           new StreamingShuffleWriter(
             streamingHandle,
@@ -275,7 +275,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
             s"falling back to SortShuffleManager")
           fallbackManager.getWriter(handle, mapId, context, metrics)
         }
-      
+
       case _ =>
         // Not a streaming shuffle handle, delegate to fallback manager
         fallbackManager.getWriter(handle, mapId, context, metrics)
@@ -322,7 +322,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
       endPartition: Int,
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
-    
+
     handle match {
       case streamingHandle: StreamingShuffleHandle[K @unchecked, _, C @unchecked] =>
         // Retrieve streaming shuffle context
@@ -332,7 +332,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
             logDebug(s"Creating StreamingShuffleReader for shuffle ${handle.shuffleId}, " +
               s"partitions [$startPartition, $endPartition), maps [$startMapIndex, $endMapIndex)")
           }
-          
+
           // Instantiate StreamingShuffleReader with backpressure protocol
           new StreamingShuffleReader(
             streamingHandle,
@@ -351,7 +351,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
           fallbackManager.getReader(handle, startMapIndex, endMapIndex,
             startPartition, endPartition, context, metrics)
         }
-      
+
       case _ =>
         // Not a streaming shuffle handle, delegate to fallback manager
         fallbackManager.getReader(handle, startMapIndex, endMapIndex,
@@ -390,10 +390,10 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
         if (debugMode) {
           logInfo(s"Unregistering streaming shuffle $shuffleId, performing cleanup")
         }
-        
+
         // Comprehensive resource cleanup per Section 0.9 memory safety
         context.cleanup()
-        
+
         if (debugMode) {
           logInfo(s"Successfully unregistered streaming shuffle $shuffleId")
         }
@@ -403,7 +403,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
           // Continue with fallback unregister even if cleanup fails
       }
     }
-    
+
     // Delegate to fallback manager for block removal and metadata cleanup
     fallbackManager.unregisterShuffle(shuffleId)
   }
@@ -426,7 +426,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
    */
   override def stop(): Unit = {
     logInfo("Stopping StreamingShuffleManager")
-    
+
     try {
       // Stop fallback monitoring thread first
       if (monitoringActive.compareAndSet(true, false)) {
@@ -444,7 +444,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
           }
         }
       }
-      
+
       // Clean up all active streaming shuffles
       val shuffleIds = activeShuffles.keySet().asScala.toList
       shuffleIds.foreach { shuffleId =>
@@ -458,10 +458,10 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
         }
       }
       activeShuffles.clear()
-      
+
       // Stop fallback manager
       fallbackManager.stop()
-      
+
       logInfo("StreamingShuffleManager stopped successfully")
     } catch {
       case e: Exception =>
@@ -541,14 +541,14 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
     if (monitoringActive.compareAndSet(false, true)) {
       fallbackMonitoringThread = new Thread("streaming-shuffle-fallback-monitor") {
         setDaemon(true)
-        
+
         override def run(): Unit = {
           logInfo("Fallback monitoring thread started")
-          
+
           while (monitoringActive.get() && !Thread.currentThread().isInterrupted) {
             try {
               Thread.sleep(10000) // Check every 10 seconds per Section 0.9
-              
+
               // Iterate over active shuffles and check for degradation conditions
               activeShuffles.asScala.foreach { case (shuffleId, context) =>
                 try {
@@ -566,11 +566,11 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
                 logError("Error in fallback monitoring thread", e)
             }
           }
-          
+
           logInfo("Fallback monitoring thread stopped")
         }
       }
-      
+
       fallbackMonitoringThread.start()
       logInfo("Started fallback monitoring thread for streaming shuffle degradation detection")
     }
@@ -596,15 +596,15 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
   private def checkFallbackConditions(
       shuffleId: Int,
       context: StreamingShuffleContext): Unit = {
-    
+
     // Check 1: Consumer throughput vs producer throughput
     // If consumer sustained 2x slower than producer for >60 seconds, trigger fallback warning
     val producerRate = context.getProducerBytesPerSecond
     val consumerRate = context.getConsumerBytesPerSecond
     val slowConsumerDuration = context.getSlowConsumerDurationMs
-    
-    if (consumerRate > 0 && producerRate > 0 && 
-        consumerRate < producerRate / 2 && 
+
+    if (consumerRate > 0 && producerRate > 0 &&
+        consumerRate < producerRate / 2 &&
         slowConsumerDuration > 60000) {
       logWarning(s"Streaming shuffle $shuffleId: Consumer sustained 2x slower than producer " +
         s"for ${slowConsumerDuration}ms. Producer rate: $producerRate bytes/s, " +
@@ -612,7 +612,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
       context.metricsSource.fallbackCount.inc()
       triggerFallback(shuffleId, "Consumer 2x slower than producer for >60s")
     }
-    
+
     // Check 2: Network saturation detection
     // If network utilization > 90%, log warning
     val networkUtilization = context.getNetworkUtilizationPercent
@@ -622,7 +622,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
       context.metricsSource.fallbackCount.inc()
       triggerFallback(shuffleId, "Network saturation exceeds 90%")
     }
-    
+
     // Check 3: Memory pressure detection
     // If buffer utilization consistently at threshold, log warning
     val bufferUtilization = context.metricsSource.toString.contains("100.0")
@@ -647,7 +647,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf)
     logWarning(s"Fallback triggered for streaming shuffle $shuffleId: $reason. " +
       s"Shuffle will complete with current strategy, but future shuffles may use " +
       s"sort-based shuffle if conditions persist.")
-    
+
     // Update context to mark fallback event
     Option(activeShuffles.get(shuffleId)).foreach { context =>
       context.recordFallbackEvent(reason)
@@ -735,7 +735,7 @@ private[streaming] class StreamingShuffleContext(
   def cleanup(): Unit = {
     try {
       logInfo(s"Cleaning up StreamingShuffleContext for shuffle $shuffleId")
-      
+
       // Unregister metrics source from MetricsSystem
       try {
         SparkEnv.get.metricsSystem.removeSource(metricsSource)
@@ -744,7 +744,7 @@ private[streaming] class StreamingShuffleContext(
         case e: Exception =>
           logWarning(s"Error unregistering metrics source for shuffle $shuffleId", e)
       }
-      
+
       // Stop memory spill manager monitoring thread
       try {
         memorySpillManager.stopMonitoring()
@@ -753,11 +753,11 @@ private[streaming] class StreamingShuffleContext(
         case e: Exception =>
           logWarning(s"Error stopping memory spill manager for shuffle $shuffleId", e)
       }
-      
+
       // Note: Memory is allocated and released by StreamingShuffleWriter on executors,
       // not during shuffle registration/cleanup on the driver.
       // No memory release needed here during shuffle unregistration.
-      
+
       // Clean up backpressure protocol state
       try {
         // Future enhancement: Add explicit cleanup method to BackpressureProtocol
@@ -766,7 +766,7 @@ private[streaming] class StreamingShuffleContext(
         case e: Exception =>
           logWarning(s"Error cleaning up backpressure protocol for shuffle $shuffleId", e)
       }
-      
+
       logInfo(s"Successfully cleaned up StreamingShuffleContext for shuffle $shuffleId")
     } catch {
       case e: Exception =>

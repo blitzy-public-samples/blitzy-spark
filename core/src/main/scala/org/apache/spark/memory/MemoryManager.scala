@@ -18,6 +18,7 @@
 package org.apache.spark.memory
 
 import javax.annotation.concurrent.GuardedBy
+
 import scala.collection.mutable
 
 import org.apache.spark.SparkConf

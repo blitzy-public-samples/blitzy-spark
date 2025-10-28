@@ -195,10 +195,14 @@ private[spark] class StreamingShuffleMetricsSource(shuffleId: Int) extends Sourc
        |  checksumMismatches: ${checksumMismatches.getCount}
        |  fallbackCount: ${fallbackCount.getCount}
        |  bytesStreamed: ${bytesStreamed.getCount} (rate: ${bytesStreamed.getMeanRate}/s)
-       |  blocksTransferred: ${blocksTransferred.getCount} (rate: ${blocksTransferred.getMeanRate}/s)
-       |  blockStreamLatency: count=${blockStreamLatency.getCount}, mean=${blockStreamLatency.getSnapshot.getMean}ms
-       |  spillLatency: count=${spillLatency.getCount}, mean=${spillLatency.getSnapshot.getMean}ms
-       |  acknowledgmentLatency: count=${acknowledgmentLatency.getCount}, mean=${acknowledgmentLatency.getSnapshot.getMean}ms
+       |  blocksTransferred: ${blocksTransferred.getCount}
+       |    (rate: ${blocksTransferred.getMeanRate}/s)
+       |  blockStreamLatency: count=${blockStreamLatency.getCount},
+       |    mean=${blockStreamLatency.getSnapshot.getMean}ms
+       |  spillLatency: count=${spillLatency.getCount},
+       |    mean=${spillLatency.getSnapshot.getMean}ms
+       |  acknowledgmentLatency: count=${acknowledgmentLatency.getCount},
+       |    mean=${acknowledgmentLatency.getSnapshot.getMean}ms
        |""".stripMargin
   }
 }

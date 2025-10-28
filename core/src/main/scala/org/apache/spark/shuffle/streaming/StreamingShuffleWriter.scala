@@ -31,7 +31,7 @@ import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.network.client.TransportClient
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.SerializationStream
-import org.apache.spark.shuffle.{ShuffleWriter, ShuffleWriteMetricsReporter}
+import org.apache.spark.shuffle.{ShuffleWriteMetricsReporter, ShuffleWriter}
 import org.apache.spark.storage.ShuffleBlockId
 
 /**
@@ -78,45 +78,45 @@ private[spark] class StreamingShuffleWriter[K, V](
 
   // Extract shuffle dependency from handle
   private val dep = handle.dependency
-  
+
   // Get Spark environment components
   private val env = SparkEnv.get
   private val blockManager = env.blockManager
   private val memoryManager = env.memoryManager
-  
+
   // Number of partitions in this shuffle
   private val numPartitions = dep.partitioner.numPartitions
-  
+
   // Per-partition buffer size from handle
   private val bufferSizePerPartition = handle.bufferSizeBytes / numPartitions
-  
+
   // Per-partition memory buffers for streaming data
   private val partitionBuffers: Array[ByteBuffer] = new Array[ByteBuffer](numPartitions)
-  
+
   // Track which partitions have been spilled to disk
   private val spilledPartitions = new ArrayBuffer[Int]()
-  
+
   // Track partition data sizes for MapStatus creation
   private val partitionLengths: Array[Long] = new Array[Long](numPartitions)
-  
+
   // Stopping flag to ensure idempotent cleanup
   private var stopping = false
-  
+
   // MapStatus to return on successful completion
   private var mapStatus: MapStatus = null
-  
+
   // Track task attempt ID for memory management
   private val taskAttemptId = context.taskAttemptId()
-  
+
   // Serializer for writing records
   private val serializer = dep.serializer.newInstance()
-  
+
   logInfo(s"StreamingShuffleWriter created for shuffle ${dep.shuffleId} map $mapId " +
     s"with $numPartitions partitions, buffer size $bufferSizePerPartition bytes per partition")
 
   /**
    * Write a bunch of records to this task's output.
-   * 
+   *
    * Main entry point for shuffle write operation. For each record:
    * 1. Compute partition ID via partitioner.getPartition(key)
    * 2. Serialize using dependency.serializer
@@ -133,34 +133,34 @@ private[spark] class StreamingShuffleWriter[K, V](
     try {
       // Allocate initial buffers for all partitions
       allocatePartitionBuffers()
-      
+
       // Register buffers with spill manager for monitoring
       registerBuffersWithSpillManager()
-      
+
       // Process each record
       var recordCount = 0L
       while (records.hasNext) {
         val record = records.next()
         val key = record._1
         val value = record._2
-        
+
         // Compute target partition
         val partitionId = dep.partitioner.getPartition(key)
-        
+
         // Serialize and write record to partition buffer
         writeRecordToPartition(partitionId, key, value)
-        
+
         recordCount += 1
-        
+
         // Periodically check buffer utilization and enforce backpressure
         if (recordCount % 100 == 0) {
           checkBufferUtilizationAndSpill()
         }
       }
-      
+
       // Final flush: stream all remaining buffered data
       flushAllPartitions()
-      
+
       // Create MapStatus with partition lengths and checksum
       val aggregatedChecksum = calculateAggregatedChecksum()
       mapStatus = MapStatus(
@@ -169,11 +169,11 @@ private[spark] class StreamingShuffleWriter[K, V](
         mapId,
         aggregatedChecksum
       )
-      
+
       logInfo(s"StreamingShuffleWriter completed for shuffle ${dep.shuffleId} map $mapId: " +
         s"$recordCount records written, ${partitionLengths.sum} bytes total, " +
         s"${spilledPartitions.size} partitions spilled")
-        
+
     } catch {
       case e: Exception =>
         logError(s"Error writing shuffle output for shuffle ${dep.shuffleId} map $mapId", e)
@@ -187,10 +187,10 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def allocatePartitionBuffers(): Unit = {
     val totalBufferSize = handle.bufferSizeBytes
-    
+
     logInfo(s"Allocating $totalBufferSize bytes total " +
-      s"($bufferSizePerPartition bytes per partition × $numPartitions partitions)")
-    
+      s"($bufferSizePerPartition bytes per partition x $numPartitions partitions)")
+
     try {
       // Acquire memory from MemoryManager
       val acquired = memoryManager.acquireStreamingShuffleMemory(
@@ -198,26 +198,26 @@ private[spark] class StreamingShuffleWriter[K, V](
         totalBufferSize,
         MemoryMode.ON_HEAP
       )
-      
+
       if (acquired < totalBufferSize) {
         throw new SparkException(
           s"Insufficient memory for streaming shuffle buffers: " +
           s"requested $totalBufferSize bytes, acquired $acquired bytes")
       }
-      
+
       // Allocate individual partition buffers
       for (partitionId <- 0 until numPartitions) {
         partitionBuffers(partitionId) = ByteBuffer.allocate(bufferSizePerPartition.toInt)
         partitionLengths(partitionId) = 0L
       }
-      
+
       // Register cleanup on task completion
       context.addTaskCompletionListener[Unit] { _ =>
         releaseAllBuffers()
       }
-      
+
       logInfo(s"Successfully allocated $numPartitions partition buffers")
-      
+
     } catch {
       case e: Exception =>
         logError("Failed to allocate partition buffers", e)
@@ -230,11 +230,11 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def registerBuffersWithSpillManager(): Unit = {
     memorySpillManager.setTotalBufferCapacity(handle.bufferSizeBytes)
-    
+
     for (partitionId <- 0 until numPartitions) {
       memorySpillManager.registerPartitionBuffer(partitionId, bufferSizePerPartition)
     }
-    
+
     logDebug(s"Registered $numPartitions partition buffers with spill manager")
   }
 
@@ -249,34 +249,34 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def writeRecordToPartition(partitionId: Int, key: K, value: V): Unit = {
     val buffer = partitionBuffers(partitionId)
-    
+
     // Check if buffer has space, stream if nearly full (90% threshold for safety)
     if (buffer.position() > buffer.capacity() * 0.9) {
       streamPartitionData(partitionId)
     }
-    
+
     // Serialize record into buffer
     val startPosition = buffer.position()
     try {
       // Create output stream for this buffer
       val bufferOutputStream = new ByteBufferOutputStream(buffer)
       val serStream: SerializationStream = serializer.serializeStream(bufferOutputStream)
-      
+
       serStream.writeKey(key.asInstanceOf[Any])
       serStream.writeValue(value.asInstanceOf[Any])
       serStream.close()
-      
+
       // Update partition length
       val bytesWritten = buffer.position() - startPosition
       partitionLengths(partitionId) += bytesWritten
-      
+
       // Update write metrics
       writeMetrics.incRecordsWritten(1)
       writeMetrics.incBytesWritten(bytesWritten)
-      
+
       // Update LRU tracking in spill manager
       memorySpillManager.updatePartitionAccessTime(partitionId)
-      
+
     } catch {
       case e: java.nio.BufferOverflowException =>
         // Buffer full - stream current contents and retry write
@@ -297,25 +297,25 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def checkBufferUtilizationAndSpill(): Unit = {
     val utilizationPercent = memorySpillManager.getBufferUtilizationPercent
-    
+
     // Update metrics (safely cast to concrete type for streaming-specific metrics)
     writeMetrics match {
       case metrics: ShuffleWriteMetrics => metrics.incBufferUtilization(utilizationPercent)
       case _ => // Reporter doesn't support streaming metrics
     }
-    
+
     // If utilization high, get partitions to spill from spill manager
     if (utilizationPercent >= 80) {
       val currentUtilization = partitionBuffers.indices.map { partitionId =>
         partitionId -> partitionBuffers(partitionId).position().toLong
       }.toMap
-      
+
       val excessBytes = (handle.bufferSizeBytes * (utilizationPercent - 80)) / 100
       val partitionsToSpill = memorySpillManager.selectPartitionsForSpill(
         currentUtilization,
         excessBytes
       )
-      
+
       // Spill selected partitions
       partitionsToSpill.foreach { partitionId =>
         spillPartitionToDisk(partitionId)
@@ -333,37 +333,37 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   def streamPartitionData(partitionId: Int): Unit = {
     val buffer = partitionBuffers(partitionId)
-    
+
     if (buffer.position() == 0) {
       // No data to stream
       return
     }
-    
+
     // Prepare buffer for reading
     buffer.flip()
-    
+
     val dataSize = buffer.remaining()
-    
+
     logDebug(s"Streaming partition $partitionId data ($dataSize bytes) to consumers")
-    
+
     try {
       // Enforce rate limiting via backpressure protocol
       backpressureProtocol.enforceRateLimit(dataSize)
-      
+
       // Generate checksum for block integrity
       val checksum = generateChecksum(buffer)
-      
+
       // Write block with checksum
       writeBlockWithChecksum(partitionId, buffer, checksum)
-      
+
       // Update metrics
       writeMetrics.incBytesWritten(dataSize)
-      
+
       // Clear buffer for reuse
       buffer.clear()
-      
+
       logDebug(s"Successfully streamed partition $partitionId ($dataSize bytes)")
-      
+
     } catch {
       case e: Exception =>
         logError(s"Error streaming partition $partitionId", e)
@@ -381,11 +381,11 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   def generateChecksum(data: ByteBuffer): Long = {
     val checksum = new CRC32C()
-    
+
     // Save current position and limit
     val position = data.position()
     val limit = data.limit()
-    
+
     try {
       // Reset to beginning for checksum calculation
       data.position(0)
@@ -408,24 +408,24 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   def writeBlockWithChecksum(partitionId: Int, data: ByteBuffer, checksum: Long): Unit = {
     val dataSize = data.remaining()
-    
+
     // Create block header: [length:Int][checksum:Long]
     val header = ByteBuffer.allocate(12)
     header.putInt(dataSize)
     header.putLong(checksum)
     header.flip()
-    
+
     // Create block ID
     val blockId = ShuffleBlockId(dep.shuffleId, mapId, partitionId)
-    
+
     // Create managed buffers
     val headerBuffer = new NioManagedBuffer(header)
     val dataBuffer = new NioManagedBuffer(data)
-    
+
     try {
       // Get transport client for network streaming
       val transportClient = getTransportClient()
-      
+
       // Upload block via streaming protocol
       // In actual implementation, this would use TransportClient.uploadStream
       // For now, we store to BlockManager as fallback
@@ -434,7 +434,7 @@ private[spark] class StreamingShuffleWriter[K, V](
       combinedBuffer.put(header.duplicate())
       combinedBuffer.put(data.duplicate())
       combinedBuffer.flip()
-      
+
       // Store via block manager as intermediate step
       blockManager.putBlockData(
         blockId,
@@ -442,9 +442,9 @@ private[spark] class StreamingShuffleWriter[K, V](
         org.apache.spark.storage.StorageLevel.MEMORY_AND_DISK,
         classTag = null
       )
-      
+
       logDebug(s"Wrote block $blockId with checksum $checksum ($dataSize bytes)")
-      
+
     } catch {
       case e: Exception =>
         logError(s"Error writing block with checksum for partition $partitionId", e)
@@ -480,44 +480,44 @@ private[spark] class StreamingShuffleWriter[K, V](
       // Already spilled
       return
     }
-    
+
     val buffer = partitionBuffers(partitionId)
-    
+
     if (buffer.position() == 0) {
       // No data to spill
       return
     }
-    
+
     logInfo(s"Spilling partition $partitionId to disk (${buffer.position()} bytes)")
-    
+
     try {
       // Prepare buffer for reading
       buffer.flip()
-      
+
       // Create managed buffer for spill
       val managedBuffer = new NioManagedBuffer(buffer.duplicate())
-      
+
       // Coordinate spill with MemorySpillManager
       memorySpillManager.spillPartition(
         dep.shuffleId,
         partitionId,
         managedBuffer
       )
-      
+
       // Mark partition as spilled
       spilledPartitions += partitionId
-      
+
       // Update spill metrics (safely cast to concrete type for streaming-specific metrics)
       writeMetrics match {
         case metrics: ShuffleWriteMetrics => metrics.incSpillCount(1)
         case _ => // Reporter doesn't support streaming metrics
       }
-      
+
       // Clear buffer for potential reuse
       buffer.clear()
-      
+
       logInfo(s"Successfully spilled partition $partitionId to disk")
-      
+
     } catch {
       case e: Exception =>
         logError(s"Error spilling partition $partitionId to disk", e)
@@ -531,7 +531,7 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def flushAllPartitions(): Unit = {
     logDebug("Flushing all partition buffers")
-    
+
     for (partitionId <- 0 until numPartitions) {
       if (!spilledPartitions.contains(partitionId)) {
         val buffer = partitionBuffers(partitionId)
@@ -540,7 +540,7 @@ private[spark] class StreamingShuffleWriter[K, V](
         }
       }
     }
-    
+
     logDebug(s"Flushed all partitions: ${spilledPartitions.size} spilled, " +
       s"${numPartitions - spilledPartitions.size} streamed")
   }
@@ -553,7 +553,7 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def calculateAggregatedChecksum(): Long = {
     val checksum = new CRC32C()
-    
+
     // Combine partition lengths into checksum
     partitionLengths.foreach { length =>
       val buffer = ByteBuffer.allocate(8)
@@ -561,7 +561,7 @@ private[spark] class StreamingShuffleWriter[K, V](
       buffer.flip()
       checksum.update(buffer)
     }
-    
+
     checksum.getValue
   }
 
@@ -571,7 +571,7 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   private def releaseAllBuffers(): Unit = {
     val startTime = System.nanoTime()
-    
+
     try {
       // Release memory via MemoryManager
       memoryManager.releaseStreamingShuffleMemory(
@@ -579,20 +579,20 @@ private[spark] class StreamingShuffleWriter[K, V](
         handle.bufferSizeBytes,
         MemoryMode.ON_HEAP
       )
-      
+
       // Unregister all partitions from spill manager
       for (partitionId <- 0 until numPartitions) {
         memorySpillManager.unregisterPartitionBuffer(partitionId)
       }
-      
+
       val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
-      
+
       if (elapsedMs > 100) {
         logWarning(s"Buffer release took ${elapsedMs}ms, exceeding 100ms target")
       } else {
         logDebug(s"Released all buffers in ${elapsedMs}ms")
       }
-      
+
     } catch {
       case e: Exception =>
         logError("Error releasing buffers", e)
@@ -613,7 +613,7 @@ private[spark] class StreamingShuffleWriter[K, V](
         return None
       }
       stopping = true
-      
+
       if (success) {
         logInfo(s"StreamingShuffleWriter stop(success=true) for " +
           s"shuffle ${dep.shuffleId} map $mapId")
@@ -645,11 +645,11 @@ private[spark] class StreamingShuffleWriter[K, V](
  * @param buffer Target ByteBuffer for output
  */
 private class ByteBufferOutputStream(buffer: ByteBuffer) extends java.io.OutputStream {
-  
+
   override def write(b: Int): Unit = {
     buffer.put(b.toByte)
   }
-  
+
   override def write(bytes: Array[Byte], off: Int, len: Int): Unit = {
     buffer.put(bytes, off, len)
   }

@@ -18,6 +18,7 @@
 package org.apache.spark.shuffle.streaming
 
 import java.util.concurrent.atomic.AtomicBoolean
+
 import scala.collection.mutable
 import scala.collection.mutable.HashMap
 import scala.reflect.ClassTag
@@ -163,7 +164,7 @@ private[spark] class MemorySpillManager(
 
     if (utilizationPercent >= spillThreshold) {
       val excessBytes = totalBufferUsed - ((totalBufferCapacity * spillThreshold) / 100)
-      
+
       logInfo(s"Buffer utilization ${utilizationPercent}% exceeds threshold ${spillThreshold}%, " +
         s"triggering spill of ${excessBytes} bytes")
 
@@ -223,7 +224,7 @@ private[spark] class MemorySpillManager(
   def selectPartitionsForSpill(
       bufferUtilization: Map[Int, Long],
       requiredSpace: Long): Seq[Int] = synchronized {
-    
+
     if (requiredSpace <= 0) {
       return Seq.empty[Int]
     }
@@ -257,16 +258,16 @@ private[spark] class MemorySpillManager(
    * and reclaims buffer memory.
    *
    * @param shuffleId shuffle identifier
-   * @param partitionId partition identifier  
+   * @param partitionId partition identifier
    * @param data buffer containing partition data
    */
   def spillPartition(
       shuffleId: Int,
       partitionId: Int,
       data: ManagedBuffer): Unit = {
-    
+
     val spillTimer = spillLatencyMetric.time()
-    
+
     try {
       val startTime = System.nanoTime()
       val dataSize = data.size()
@@ -330,7 +331,7 @@ private[spark] class MemorySpillManager(
       taskAttemptId: Long,
       partitionId: Int,
       numBytes: Long): Unit = {
-    
+
     val startTime = System.nanoTime()
 
     try {
@@ -348,7 +349,7 @@ private[spark] class MemorySpillManager(
       synchronized {
         val currentSize = partitionBufferSizes.getOrElse(partitionId, 0L)
         val newSize = math.max(0L, currentSize - numBytes)
-        
+
         if (newSize > 0) {
           partitionBufferSizes.put(partitionId, newSize)
         } else {
@@ -457,7 +458,7 @@ private[spark] class MemorySpillManager(
  * Companion object for MemorySpillManager.
  */
 private[spark] object MemorySpillManager {
-  
+
   /**
    * Create a MemorySpillManager instance with dependencies from SparkEnv.
    *
@@ -467,7 +468,7 @@ private[spark] object MemorySpillManager {
   def create(conf: SparkConf): MemorySpillManager = {
     val env = SparkEnv.get
     require(env != null, "SparkEnv must be initialized before creating MemorySpillManager")
-    
+
     new MemorySpillManager(
       conf,
       env.memoryManager,
