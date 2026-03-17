@@ -39,10 +39,10 @@ import org.apache.spark.metrics.source.Source
  * metrics or any other existing metrics sources.
  *
  * Registered gauges:
- *  - `shuffle.streaming.bufferUtilizationPercent` — real-time buffer occupancy percentage
- *  - `shuffle.streaming.spillCount` — cumulative disk spill events
- *  - `shuffle.streaming.backpressureEvents` — consumer rate limiting incidents
- *  - `shuffle.streaming.partialReadInvalidations` — producer failure detection count
+ *  - `shuffle.streaming.bufferUtilizationPercent` -- real-time buffer occupancy percentage
+ *  - `shuffle.streaming.spillCount` -- cumulative disk spill events
+ *  - `shuffle.streaming.backpressureEvents` -- consumer rate limiting incidents
+ *  - `shuffle.streaming.partialReadInvalidations` -- producer failure detection count
  */
 private[spark] class StreamingShuffleMetricsSource extends Source {
 
@@ -85,22 +85,22 @@ private[spark] class StreamingShuffleMetricsSource extends Source {
    * @param metricsSystem the Spark MetricsSystem instance to register this source with
    */
   def register(metricsSystem: MetricsSystem): Unit = {
-    // Register buffer utilization gauge — updated by MemorySpillManager
+    // Register buffer utilization gauge -- updated by MemorySpillManager
     metricRegistry.register(
       MetricRegistry.name("shuffle", "streaming", "bufferUtilizationPercent"),
       new StreamingShuffleGauge(_bufferUtilizationPercent))
 
-    // Register spill count gauge — incremented by MemorySpillManager on each spill event
+    // Register spill count gauge -- incremented by MemorySpillManager on each spill event
     metricRegistry.register(
       MetricRegistry.name("shuffle", "streaming", "spillCount"),
       new StreamingShuffleGauge(_spillCount))
 
-    // Register backpressure events gauge — incremented by BackpressureProtocol
+    // Register backpressure events gauge -- incremented by BackpressureProtocol
     metricRegistry.register(
       MetricRegistry.name("shuffle", "streaming", "backpressureEvents"),
       new StreamingShuffleGauge(_backpressureEvents))
 
-    // Register partial read invalidations gauge — incremented by StreamingShuffleReader
+    // Register partial read invalidations gauge -- incremented by StreamingShuffleReader
     metricRegistry.register(
       MetricRegistry.name("shuffle", "streaming", "partialReadInvalidations"),
       new StreamingShuffleGauge(_partialReadInvalidations))
@@ -110,7 +110,7 @@ private[spark] class StreamingShuffleMetricsSource extends Source {
   }
 
   // ---------------------------------------------------------------------------
-  // Metric update methods — called by streaming shuffle components
+  // Metric update methods -- called by streaming shuffle components
   // ---------------------------------------------------------------------------
 
   /**
@@ -119,7 +119,7 @@ private[spark] class StreamingShuffleMetricsSource extends Source {
    * the current aggregate buffer occupancy across all active streaming shuffles
    * on this executor.
    *
-   * @param value buffer utilization as a percentage (0–100)
+   * @param value buffer utilization as a percentage (0-100)
    */
   def updateBufferUtilizationPercent(value: Long): Unit = {
     _bufferUtilizationPercent.set(value)
@@ -154,7 +154,7 @@ private[spark] class StreamingShuffleMetricsSource extends Source {
   }
 
   // ---------------------------------------------------------------------------
-  // Accessor methods — for testing, telemetry, and programmatic inspection
+  // Accessor methods -- for testing, telemetry, and programmatic inspection
   // ---------------------------------------------------------------------------
 
   /** Returns the current cumulative disk spill count. */
@@ -166,6 +166,6 @@ private[spark] class StreamingShuffleMetricsSource extends Source {
   /** Returns the current cumulative partial read invalidation count. */
   def getPartialReadInvalidations: Long = _partialReadInvalidations.get()
 
-  /** Returns the current buffer utilization percentage (0–100). */
+  /** Returns the current buffer utilization percentage (0-100). */
   def getBufferUtilizationPercent: Long = _bufferUtilizationPercent.get()
 }

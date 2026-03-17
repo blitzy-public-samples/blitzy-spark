@@ -37,7 +37,7 @@ import org.apache.spark.storage.{BlockId, ShuffleMergedBlockId}
  * pipeline's in-memory buffer cache, with disk-spilled data as a fallback for
  * memory-pressure scenarios.
  *
- * Merged block support is intentionally not implemented — streaming shuffle does not
+ * Merged block support is intentionally not implemented -- streaming shuffle does not
  * participate in push-based shuffle merging. Both [[getMergedBlockData]] and
  * [[getMergedBlockMeta]] return empty/minimal results.
  *
@@ -81,7 +81,7 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
    *
    * Resolution order:
    * 1. Check the in-memory block cache for a direct hit
-   * 2. If not found, the block may have been spilled to disk — callers should
+   * 2. If not found, the block may have been spilled to disk -- callers should
    *    coordinate with [[MemorySpillManager]] for disk-spilled block retrieval
    *    via BlockManager before invoking this method
    *
@@ -101,7 +101,7 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
       // for zero-copy delivery to the network transport layer
       new NioManagedBuffer(java.nio.ByteBuffer.wrap(cached))
     } else {
-      // Block not in memory — this occurs when the block was already consumed and
+      // Block not in memory -- this occurs when the block was already consumed and
       // reclaimed, or was spilled to disk and must be fetched via BlockManager.
       // Throwing here follows the ShuffleBlockResolver contract: "If the data for
       // that block is not available, throws an unspecified exception."
@@ -136,12 +136,12 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
    *
    * Returns an empty sequence since the streaming pipeline streams data directly
    * from producers to consumers without the intermediate merge step used by
-   * push-based shuffle. This is intentional per the AAP specification — streaming
+   * push-based shuffle. This is intentional per the AAP specification -- streaming
    * shuffle operates as a completely separate data path.
    *
    * @param blockId The merged block identifier (unused)
    * @param dirs Optional directory overrides (unused)
-   * @return Empty sequence — no merged block data available
+   * @return Empty sequence -- no merged block data available
    */
   override def getMergedBlockData(
       blockId: ShuffleMergedBlockId,
@@ -173,7 +173,7 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
    *
    * Called during orderly shutdown of the streaming shuffle subsystem.
    * After this method returns, all in-memory block data is released and
-   * the shuffle-to-blocks mapping is cleared. This method is idempotent —
+   * the shuffle-to-blocks mapping is cleared. This method is idempotent --
    * calling it multiple times has no adverse effects.
    */
   override def stop(): Unit = {
@@ -181,7 +181,7 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
     val shuffleMapCount = shuffleMapBlocks.size()
     blockCache.clear()
     shuffleMapBlocks.clear()
-    logInfo(s"StreamingShuffleBlockResolver stopped — " +
+    logInfo(s"StreamingShuffleBlockResolver stopped -- " +
       s"cleared $blockCount cached blocks and $shuffleMapCount shuffle map entries")
   }
 
@@ -253,7 +253,7 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
    * 2. Removes each associated block from the block cache
    *
    * This method is safe to call even if some blocks have already been
-   * individually removed via [[removeBlockData]] — the cache removal
+   * individually removed via [[removeBlockData]] -- the cache removal
    * operations are idempotent.
    *
    * @param shuffleId The shuffle whose map output should be removed
