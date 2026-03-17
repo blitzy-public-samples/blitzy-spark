@@ -43,7 +43,10 @@ private[spark] trait ShuffleReadMetricsReporter {
   private[spark] def incLocalMergedBytesRead(v: Long): Unit
   private[spark] def incRemoteReqsDuration(v: Long): Unit
   private[spark] def incRemoteMergedReqsDuration(v: Long): Unit
-  // Streaming shuffle read metrics - default no-op implementations for backward compatibility
+
+  // Streaming shuffle read metrics — default no-op implementations for backward compatibility.
+  // These methods are overridden by streaming-aware implementations in
+  // ShuffleReadMetrics and TempShuffleReadMetrics when streaming shuffle is active.
   private[spark] def incPartialReadInvalidations(v: Long): Unit = {}
   private[spark] def incStreamingBlocksReceived(v: Long): Unit = {}
   private[spark] def incChecksumFailures(v: Long): Unit = {}
@@ -63,7 +66,10 @@ private[spark] trait ShuffleWriteMetricsReporter {
   private[spark] def incWriteTime(v: Long): Unit
   private[spark] def decBytesWritten(v: Long): Unit
   private[spark] def decRecordsWritten(v: Long): Unit
-  // Streaming shuffle write metrics - default no-op implementations for backward compatibility
+
+  // Streaming shuffle write metrics — default no-op implementations for backward compatibility.
+  // These methods are overridden by streaming-aware implementations in
+  // ShuffleWriteMetrics when streaming shuffle is active.
   private[spark] def incStreamingBufferBytes(v: Long): Unit = {}
   private[spark] def incStreamingSpillCount(v: Long): Unit = {}
   private[spark] def incBackpressureEvents(v: Long): Unit = {}
