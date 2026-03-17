@@ -52,6 +52,7 @@ import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.scheduler._
 import org.apache.spark.serializer.SerializerHelper
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleBlockPusher}
+import org.apache.spark.shuffle.streaming.StreamingShuffleMetricsSource
 import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.storage.{StorageLevel, TaskResultBlockId}
 import org.apache.spark.util._
@@ -164,6 +165,13 @@ private[spark] class Executor(
     env.metricsSystem.registerSource(new JVMCPUSource())
     executorMetricsSource.foreach(_.register(env.metricsSystem))
     env.metricsSystem.registerSource(env.blockManager.shuffleMetricsSource)
+    // Register streaming shuffle metrics source when streaming shuffle is enabled.
+    // Coexistence: streaming metrics are only registered when opt-in streaming shuffle is active,
+    // following the ExecutorMetricsSource registration pattern above.
+    if (conf.get(SHUFFLE_STREAMING_ENABLED)) {
+      val streamingShuffleMetricsSource = new StreamingShuffleMetricsSource()
+      streamingShuffleMetricsSource.register(env.metricsSystem)
+    }
   } else {
     // This enable the registration of the executor source in local mode.
     // The actual registration happens in SparkContext,
