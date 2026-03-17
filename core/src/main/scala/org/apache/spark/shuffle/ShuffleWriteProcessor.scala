@@ -21,6 +21,7 @@ import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.LogKeys.{NUM_MERGER_LOCATIONS, SHUFFLE_ID, STAGE_ID}
 import org.apache.spark.scheduler.MapStatus
+import org.apache.spark.shuffle.streaming.StreamingShuffleHandle
 
 /**
  * The interface for customizing shuffle write process. The driver create a ShuffleWriteProcessor
@@ -70,7 +71,13 @@ private[spark] class ShuffleWriteProcessor extends Serializable with Logging {
         // The map task only takes care of converting the shuffle data file into multiple
         // block push requests. It delegates pushing the blocks to a different thread-pool -
         // ShuffleBlockPusher.BLOCK_PUSHER_POOL.
-        if (!dep.shuffleMergeFinalized) {
+        // Streaming shuffle handles use their own StreamingShuffleBlockResolver and do not
+        // participate in push-based shuffle. The push-based block pushing is only applicable
+        // to sort-based shuffle with IndexShuffleBlockResolver.
+        // Coexistence: streaming shuffles skip this path entirely; sort-based shuffles
+        // continue to use push-based shuffle as before.
+        if (!dep.shuffleMergeFinalized &&
+            !dep.shuffleHandle.isInstanceOf[StreamingShuffleHandle[_, _, _]]) {
           manager.shuffleBlockResolver match {
             case resolver: IndexShuffleBlockResolver =>
               logInfo(log"Shuffle merge enabled with" +
