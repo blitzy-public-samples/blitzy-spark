@@ -59,4 +59,8 @@ private[spark] trait ShuffleWriteMetricsReporter {
   private[spark] def incWriteTime(v: Long): Unit
   private[spark] def decBytesWritten(v: Long): Unit
   private[spark] def decRecordsWritten(v: Long): Unit
+  // Streaming shuffle write metrics - default no-op implementations for backward compatibility
+  private[spark] def incStreamingBufferBytes(v: Long): Unit = {}
+  private[spark] def incStreamingSpillCount(v: Long): Unit = {}
+  private[spark] def incBackpressureEvents(v: Long): Unit = {}
 }

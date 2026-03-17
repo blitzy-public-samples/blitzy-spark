@@ -74,6 +74,10 @@ private[spark] object InternalAccumulator {
     val BYTES_WRITTEN = SHUFFLE_WRITE_METRICS_PREFIX + "bytesWritten"
     val RECORDS_WRITTEN = SHUFFLE_WRITE_METRICS_PREFIX + "recordsWritten"
     val WRITE_TIME = SHUFFLE_WRITE_METRICS_PREFIX + "writeTime"
+    // Streaming shuffle write metrics
+    val STREAMING_BUFFER_BYTES = SHUFFLE_WRITE_METRICS_PREFIX + "streamingBufferBytes"
+    val STREAMING_SPILL_COUNT = SHUFFLE_WRITE_METRICS_PREFIX + "streamingSpillCount"
+    val BACKPRESSURE_EVENTS = SHUFFLE_WRITE_METRICS_PREFIX + "backpressureEvents"
   }
 
   // Names of output metrics
