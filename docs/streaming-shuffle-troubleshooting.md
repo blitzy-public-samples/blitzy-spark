@@ -318,13 +318,13 @@ messages to diagnose specific conditions:
 
 | Log Message | Level | Component | Meaning |
 |---|---|---|---|
-| `StreamingShuffleManager initialized` | INFO | StreamingShuffleManager | Streaming shuffle manager loaded and activated successfully |
-| `Buffer utilization exceeded threshold` | WARN | MemorySpillManager | Buffer occupancy exceeded the configured `spillThreshold`; disk spill initiated |
-| `Backpressure activated for shuffle <id>` | INFO | BackpressureProtocol | Consumer rate limiting engaged for a specific shuffle; producer output rate throttled |
-| `Producer failure detected for executor <id>` | WARN | StreamingShuffleReader | Connection timeout after 5 seconds; producer executor presumed failed |
-| `Partial read invalidated for shuffle <id>, map <id>` | WARN | StreamingShuffleReader | Incomplete data from a failed producer discarded; triggers upstream recomputation |
-| `Falling back to sort-based shuffle` | WARN | StreamingShuffleManager | Automatic fallback condition met; this shuffle reverts to sort-based behavior |
-| `Checksum mismatch for block <id>` | WARN | StreamingShuffleReader | CRC32C validation failed for a received block; retransmission requested |
+| `StreamingShuffleManager initialized` | INFO | StreamingShuffleManager | Streaming shuffle manager loaded and activated successfully (planned — emitted when StreamingShuffleManager is created) |
+| `Spill triggered: allocated=<bytes> bytes >= ...` | INFO | MemorySpillManager | Buffer occupancy exceeded the configured `spillThreshold`; disk spill initiated for the largest buffered partition |
+| `backpressureEvent: shuffle=<id> reason=<reason> ...` | INFO | BackpressureProtocol | Backpressure condition detected for a specific shuffle; includes reason (e.g., consumer slowdown, rate limit) and current metrics |
+| `Streaming shuffle producer failure detected for block <id> from <host>:<port>: <message>` | WARN | StreamingShuffleReader | Connection timeout or IOException during block fetch; producer executor presumed failed; partial reads invalidated and FetchFailedException thrown for DAG recomputation |
+| `Spilling partition (shuffle=<id>, partition=<id>): <bytes> bytes` | INFO | MemorySpillManager | A specific partition's buffer is being persisted to disk during spill; includes partition identification and data volume |
+| `Falling back to sort-based shuffle` | WARN | StreamingShuffleManager | Automatic fallback condition met; this shuffle reverts to sort-based behavior (planned — emitted when StreamingShuffleManager is created) |
+| `CRC32C validation failed for block <id>: received <n> bytes but expected <n> bytes` | ERROR | StreamingShuffleReader | CRC32C size-based integrity validation failed; IOException thrown to trigger the FetchFailedException path for retransmission |
 
 ## Step-by-Step Debugging Workflow
 

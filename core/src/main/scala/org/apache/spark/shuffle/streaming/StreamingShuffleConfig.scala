@@ -19,6 +19,7 @@ package org.apache.spark.shuffle.streaming
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.config._
 
 /**
  * Centralized configuration constants and validation for streaming shuffle parameters.
@@ -77,52 +78,44 @@ private[spark] object StreamingShuffleConfig extends Logging {
 
   // ========== Helper Methods ==========
 
-  /** Check if streaming shuffle is enabled in the given configuration. */
+  /**
+   * Check if streaming shuffle is enabled in the given configuration.
+   * Delegates to the [[SHUFFLE_STREAMING_ENABLED]] ConfigEntry which provides
+   * type-safe access with the registered default value.
+   */
   def isStreamingEnabled(conf: SparkConf): Boolean = {
-    conf.getBoolean(STREAMING_ENABLED_KEY, STREAMING_ENABLED_DEFAULT)
+    conf.get(SHUFFLE_STREAMING_ENABLED)
   }
 
   /**
-   * Get buffer size percentage with range validation [1, 50].
-   * Returns the configured value if within valid range, otherwise logs a warning
-   * and returns the default value.
+   * Get buffer size percentage via the [[SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT]]
+   * ConfigEntry. Range validation [1, 50] is enforced by the ConfigBuilder's
+   * checkValue constraint defined in config/package.scala.
    */
   def getBufferSizePercent(conf: SparkConf): Int = {
-    val value = conf.getInt(BUFFER_SIZE_PERCENT_KEY, BUFFER_SIZE_PERCENT_DEFAULT)
-    if (value < BUFFER_SIZE_PERCENT_MIN || value > BUFFER_SIZE_PERCENT_MAX) {
-      logWarning(s"$BUFFER_SIZE_PERCENT_KEY=$value is outside valid range " +
-        s"[$BUFFER_SIZE_PERCENT_MIN, $BUFFER_SIZE_PERCENT_MAX], " +
-        s"using default $BUFFER_SIZE_PERCENT_DEFAULT")
-      BUFFER_SIZE_PERCENT_DEFAULT
-    } else {
-      value
-    }
+    conf.get(SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT)
   }
 
   /**
-   * Get spill threshold percentage with range validation [50, 95].
-   * Returns the configured value if within valid range, otherwise logs a warning
-   * and returns the default value.
+   * Get spill threshold percentage via the [[SHUFFLE_STREAMING_SPILL_THRESHOLD]]
+   * ConfigEntry. Range validation [50, 95] is enforced by the ConfigBuilder's
+   * checkValue constraint defined in config/package.scala.
    */
   def getSpillThreshold(conf: SparkConf): Int = {
-    val value = conf.getInt(SPILL_THRESHOLD_KEY, SPILL_THRESHOLD_DEFAULT)
-    if (value < SPILL_THRESHOLD_MIN || value > SPILL_THRESHOLD_MAX) {
-      logWarning(s"$SPILL_THRESHOLD_KEY=$value is outside valid range " +
-        s"[$SPILL_THRESHOLD_MIN, $SPILL_THRESHOLD_MAX], " +
-        s"using default $SPILL_THRESHOLD_DEFAULT")
-      SPILL_THRESHOLD_DEFAULT
-    } else {
-      value
-    }
+    conf.get(SHUFFLE_STREAMING_SPILL_THRESHOLD)
   }
 
-  /** Get maximum bandwidth in MB/s. 0 means unlimited. */
+  /**
+   * Get maximum bandwidth in MB/s via the [[SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS]]
+   * ConfigEntry. Non-negative validation is enforced by the ConfigBuilder's
+   * checkValue constraint defined in config/package.scala. 0 means unlimited.
+   */
   def getMaxBandwidthMBps(conf: SparkConf): Int = {
-    conf.getInt(MAX_BANDWIDTH_MBPS_KEY, MAX_BANDWIDTH_MBPS_DEFAULT)
+    conf.get(SHUFFLE_STREAMING_MAX_BANDWIDTH_MBPS)
   }
 
   /** Check if debug logging is enabled for streaming shuffle. */
   def isDebugEnabled(conf: SparkConf): Boolean = {
-    conf.getBoolean(DEBUG_ENABLED_KEY, DEBUG_ENABLED_DEFAULT)
+    conf.get(SHUFFLE_STREAMING_DEBUG)
   }
 }

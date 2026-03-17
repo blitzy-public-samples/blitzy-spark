@@ -110,6 +110,35 @@ private[spark] class MemorySpillManager(
   /** Cumulative spill operation latency in nanoseconds since start */
   private val spillLatencyNs = new AtomicLong(0L)
 
+  // -- Spill Data Callback --
+
+  /**
+   * Callback type for writing actual partition buffer data to a spill file.
+   *
+   * When a spill is triggered, the MemorySpillManager selects the largest partition
+   * for eviction and allocates a temporary disk file. However, actual buffer data
+   * is held externally by the StreamingShuffleWriter (not by this metadata tracker).
+   * The registered callback is invoked to serialize the partition's buffer data to
+   * the target spill file before the memory is reclaimed.
+   *
+   * Parameters: (shuffleId: Int, partitionId: Int, spillFile: File) => Boolean
+   * Returns: true if data was successfully written to spillFile, false otherwise
+   */
+  @volatile private var spillDataCallback: Option[(Int, Int, File) => Boolean] = None
+
+  /**
+   * Registers a callback for writing partition buffer data to disk during spill events.
+   *
+   * Must be called by StreamingShuffleWriter after construction so that spill
+   * operations can persist actual data rather than creating empty files.
+   *
+   * @param callback Function that writes buffer data for (shuffleId, partitionId) to
+   *                 the given File, returning true on success
+   */
+  def registerSpillCallback(callback: (Int, Int, File) => Boolean): Unit = {
+    spillDataCallback = Some(callback)
+  }
+
   // -- Inner Types --
 
   /**
@@ -243,7 +272,7 @@ private[spark] class MemorySpillManager(
         s"(shuffle=$shuffleId, partition=$partitionId)")
       return false
     }
-    require(sizeBytes >= 0, s"sizeBytes must be non-negative, got $sizeBytes")
+    require(sizeBytes > 0, s"sizeBytes must be positive, got $sizeBytes")
 
     // CAS loop for atomic check-and-increment of totalAllocatedBytes.
     // Prevents concurrent allocations from exceeding totalAvailableBytes.
@@ -423,6 +452,44 @@ private[spark] class MemorySpillManager(
           logInfo(s"Spilling partition (shuffle=$shuffleId, partition=$partitionId): " +
             s"${candidateInfo.sizeBytes} bytes to block $spillBlockId")
 
+          // Write actual partition buffer data to the spill file via the registered
+          // callback. The callback is provided by StreamingShuffleWriter which holds
+          // the actual buffer bytes. This ensures data is persisted to disk before
+          // memory is reclaimed, maintaining the zero data loss guarantee.
+          val dataWritten = spillDataCallback match {
+            case Some(callback) =>
+              try {
+                callback(shuffleId, partitionId, spillFile)
+              } catch {
+                case e: Exception =>
+                  logWarning(s"Spill data callback failed for (shuffle=$shuffleId, " +
+                    s"partition=$partitionId): ${e.getMessage}", e)
+                  // Clean up the empty spill file on callback failure
+                  if (spillFile.exists()) {
+                    spillFile.delete()
+                  }
+                  false
+              }
+            case None =>
+              logWarning(s"No spill data callback registered -- cannot persist buffer " +
+                s"data to disk (shuffle=$shuffleId, partition=$partitionId). " +
+                s"Register a callback via registerSpillCallback() before starting " +
+                s"the spill manager.")
+              // Clean up the unused spill file
+              if (spillFile.exists()) {
+                spillFile.delete()
+              }
+              false
+          }
+
+          if (!dataWritten) {
+            // Data write failed or no callback -- abort spill without reclaiming memory.
+            // The partition stays in memory to preserve data integrity.
+            logWarning(s"Spill aborted for (shuffle=$shuffleId, partition=$partitionId): " +
+              s"data was not written to disk, keeping partition in memory")
+            return
+          }
+
           // Create updated info marking the partition as spilled with file reference
           val spilledInfo = candidateInfo.copy(
             spilledToDisk = true,
@@ -434,8 +501,7 @@ private[spark] class MemorySpillManager(
           val key = (shuffleId, partitionId)
           if (partitionBuffers.replace(key, candidateInfo, spilledInfo)) {
             // Spill marked successfully -- reclaim memory tracking.
-            // Note: the actual data write to spillFile is coordinated externally
-            // by StreamingShuffleWriter, which holds the actual buffer data bytes.
+            // Data has been written to spillFile by the callback above.
             totalAllocatedBytes.addAndGet(-candidateInfo.sizeBytes)
 
             // Update spill metrics atomically

@@ -18,15 +18,21 @@
 package org.apache.spark.shuffle.streaming
 
 import java.io.{ByteArrayInputStream, InputStream, IOException}
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.{Callable, TimeoutException => JTimeoutException, TimeUnit}
 import java.util.zip.CRC32C
 
 import scala.collection
+import scala.reflect.ClassTag
 
 import org.apache.spark._
 import org.apache.spark.internal.Logging
+import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.shuffle._
-import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockId}
+import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockId, StorageLevel}
 import org.apache.spark.util.CompletionIterator
+import org.apache.spark.util.ThreadUtils
 import org.apache.spark.util.collection.ExternalSorter
 
 /**
@@ -270,11 +276,15 @@ private[spark] class StreamingShuffleReader[K, C](
 
           readMetrics.incPartialReadInvalidations(1)
 
-          // Extract reduceId from ShuffleBlockId for FetchFailedException.
-          // If the blockId is not a ShuffleBlockId (defensive case), default to 0.
-          val reduceId = blockId match {
-            case sbId: ShuffleBlockId => sbId.reduceId
-            case _ => 0
+          // Extract mapId and reduceId from ShuffleBlockId for FetchFailedException.
+          // mapId is the unique task attempt ID used by DAGScheduler to invalidate
+          // the correct map output via MapOutputTracker.mapIdToMapIndex, while
+          // mapIndex is the array position. Using mapIndex as mapId would cause
+          // DAGScheduler to fail to invalidate the correct map output on producer
+          // failure. This pattern follows ShuffleBlockFetcherIterator.throwFetchFailedException.
+          val (mapId, reduceId) = blockId match {
+            case sbId: ShuffleBlockId => (sbId.mapId, sbId.reduceId)
+            case _ => (mapIndex.toLong, 0)
           }
 
           // Throw FetchFailedException to trigger DAG recomputation.
@@ -282,7 +292,7 @@ private[spark] class StreamingShuffleReader[K, C](
           // which ensures the executor sends the error back to the driver.
           // The DAGScheduler then resubmits the upstream ShuffleMapStage.
           throw new FetchFailedException(
-            address, handle.shuffleId, mapIndex.toLong, mapIndex, reduceId,
+            address, handle.shuffleId, mapId, mapIndex, reduceId,
             s"Streaming shuffle producer failure for block $blockId from " +
               s"${address.host}:${address.port}: ${e.getMessage}", e)
       }
@@ -290,12 +300,15 @@ private[spark] class StreamingShuffleReader[K, C](
   }
 
   /**
-   * Fetches a single block from a producer with connection timeout handling.
+   * Fetches a single block from a producer with the streaming-specific connection
+   * timeout ({@code connectionTimeoutMs} = 5 seconds) for producer failure detection.
    *
-   * Uses the existing [[org.apache.spark.storage.BlockManager BlockManager]]
-   * infrastructure for remote block retrieval via the Netty-based transport layer.
-   * The transport layer enforces connection timeouts configured via
-   * {@code spark.network.timeout} and related Spark network configuration.
+   * The default {@code spark.network.timeout} (120 seconds) is too long for streaming
+   * shuffle's real-time producer failure detection requirement. This method wraps the
+   * [[org.apache.spark.storage.BlockManager BlockManager]]'s remote fetch in a
+   * dedicated thread with explicit timeout enforcement, converting timeout to
+   * [[IOException]] to trigger the [[FetchFailedException]] path for DAG
+   * recomputation.
    *
    * For streaming shuffle blocks (max 2MB), the byte array conversion is safe
    * and efficient -- well within JVM array size limits.
@@ -311,10 +324,35 @@ private[spark] class StreamingShuffleReader[K, C](
       address: BlockManagerId,
       blockId: BlockId,
       expectedSize: Long): Array[Byte] = {
-    // Use BlockManager's existing remote block retrieval which internally uses
-    // the Netty TransportClient with configurable connection timeouts.
-    // The transport layer handles retry logic and connection pooling.
-    val data = blockManager.getRemoteBytes(blockId)
+    // Submit the remote fetch to a dedicated thread pool for timeout enforcement.
+    // blockManager.getRemoteBytes() uses the global spark.network.timeout (default
+    // 120s), but streaming shuffle requires the AAP-specified 5-second timeout for
+    // producer failure detection. This wrapper enforces the streaming-specific
+    // connection timeout to enable fast failover and DAG recomputation.
+    val fetchCallable = new Callable[Option[org.apache.spark.util.io.ChunkedByteBuffer]] {
+      override def call(): Option[org.apache.spark.util.io.ChunkedByteBuffer] = {
+        blockManager.getRemoteBytes(blockId)
+      }
+    }
+    val fetchFuture = StreamingShuffleReader.fetchTimeoutExecutor.submit(fetchCallable)
+
+    val data = try {
+      fetchFuture.get(connectionTimeoutMs, TimeUnit.MILLISECONDS)
+    } catch {
+      case _: JTimeoutException =>
+        // Cancel the in-flight fetch to release transport resources.
+        fetchFuture.cancel(true)
+        throw new IOException(
+          s"Streaming shuffle block fetch timed out after ${connectionTimeoutMs}ms " +
+            s"for block $blockId from ${address.host}:${address.port}. " +
+            s"Producer may have failed or is experiencing excessive GC pauses.")
+      case e: java.util.concurrent.ExecutionException =>
+        // Unwrap execution exceptions from the fetch thread.
+        throw new IOException(
+          s"Failed to fetch streaming shuffle block $blockId from " +
+            s"${address.host}:${address.port}: ${e.getCause.getMessage}", e.getCause)
+    }
+
     data match {
       case Some(buffer) =>
         // Convert ChunkedByteBuffer to byte array for checksum validation.
@@ -349,8 +387,18 @@ private[spark] class StreamingShuffleReader[K, C](
    *     and an IOException is thrown to trigger retransmission.
    *  2. CRC32C computation: Computes a deterministic checksum fingerprint for
    *     each block, logged at DEBUG level for post-incident corruption diagnosis.
-   *     When the streaming protocol's expected checksum is available from the
-   *     producer's block metadata, it is compared against the computed value.
+   *
+   * '''Known limitation''': The current implementation computes a CRC32C checksum
+   * on the consumer side but does not compare it against a producer-supplied
+   * expected checksum value. True end-to-end integrity verification requires the
+   * producer ([[StreamingShuffleWriter]]) to embed the CRC32C checksum in the
+   * block metadata during streaming transfer. This comparison will be implemented
+   * when the streaming block transfer protocol includes checksum metadata from
+   * the producer side. Until then, this method provides:
+   *  - Size-based corruption detection (catches truncation and padding errors)
+   *  - Deterministic checksum fingerprinting for post-incident diagnosis
+   *  - Application-layer validation beyond TCP checksums (catches memory/
+   *    serialization errors)
    *
    * The checksum computation overhead is minimal for 2MB blocks (~0.5ms per block
    * on modern hardware), well within the less-than-1-percent CPU utilization budget
@@ -436,22 +484,55 @@ private[spark] class StreamingShuffleReader[K, C](
    * @param blockId The block identifier being acknowledged as successfully consumed
    */
   private def sendAcknowledgment(address: BlockManagerId, blockId: BlockId): Unit = {
-    // The acknowledgment is sent via the existing Netty TransportClient channel
-    // that was used to fetch the block. The transport layer handles RPC delivery
-    // semantics and connection management.
-    //
-    // This is the integration point with the BackpressureProtocol on the producer
-    // side. The producer monitors incoming acknowledgments to:
-    //  - Reclaim buffer memory for consumed blocks within 100ms
-    //  - Track consumer liveness via heartbeat timestamps
-    //  - Adjust flow control rate based on consumer consumption speed
-    //
-    // Acknowledgment failure is non-fatal: if the producer has already crashed,
-    // the FetchFailedException path handles recovery. If the ack is simply lost
-    // due to transient network issues, the producer retains the buffer until
-    // shuffle unregistration cleanup.
-    logDebug(s"Sending acknowledgment for block $blockId to " +
-      s"${address.host}:${address.port} for buffer reclamation")
+    try {
+      // Extract shuffle metadata from the block ID for the acknowledgment payload.
+      // Only ShuffleBlockId instances carry the shuffle-specific identifiers needed
+      // by BackpressureProtocol.processConsumerAck() on the producer side.
+      val (shuffleId, mapId) = blockId match {
+        case sbId: ShuffleBlockId => (sbId.shuffleId, sbId.mapId)
+        case _ => return // Only acknowledge shuffle blocks
+      }
+
+      // Encode acknowledgment payload for BackpressureProtocol.processConsumerAck():
+      //  - shuffleId (4 bytes): identifies the shuffle for priority arbitration
+      //  - mapId (8 bytes): identifies the specific map task for buffer reclamation
+      //  - consumerIdLength (4 bytes): length of the consumer executor ID string
+      //  - consumerId (variable): consumer executor ID for heartbeat liveness tracking
+      val consumerId = blockManager.blockManagerId.executorId
+      val consumerBytes = consumerId.getBytes(StandardCharsets.UTF_8)
+      val ackPayload = ByteBuffer.allocate(4 + 8 + 4 + consumerBytes.length)
+      ackPayload.putInt(shuffleId)
+      ackPayload.putLong(mapId)
+      ackPayload.putInt(consumerBytes.length)
+      ackPayload.put(consumerBytes)
+      ackPayload.flip()
+
+      // Send ack via the block transfer service's upload mechanism to the producer
+      // executor. The producer-side StreamingShuffleManager handles incoming ack
+      // blocks and routes them to BackpressureProtocol.processConsumerAck() for
+      // buffer reclamation within 100ms. Fire-and-forget: the returned Future is
+      // not awaited since ack failure is non-fatal.
+      blockManager.blockTransferService.uploadBlock(
+        address.host,
+        address.port,
+        address.executorId,
+        blockId,
+        new NioManagedBuffer(ackPayload),
+        StorageLevel.NONE,
+        ClassTag(classOf[Array[Byte]]))
+
+      logDebug(s"Sent acknowledgment for block $blockId to " +
+        s"${address.host}:${address.port} for buffer reclamation " +
+        s"(shuffleId=$shuffleId, mapId=$mapId, consumer=$consumerId)")
+    } catch {
+      // Acknowledgment failure is non-fatal: if the producer has already crashed,
+      // the FetchFailedException path handles recovery. If the ack is simply lost
+      // due to transient network issues, the producer retains the buffer until
+      // shuffle unregistration cleanup by StreamingShuffleManager.unregisterShuffle().
+      case e: Exception =>
+        logDebug(s"Failed to send acknowledgment for block $blockId to " +
+          s"${address.host}:${address.port}: ${e.getMessage}")
+    }
   }
 
   /**
@@ -535,4 +616,27 @@ private[spark] class StreamingShuffleReader[K, C](
       interruptibleIter.asInstanceOf[Iterator[(K, C)]]
     }
   }
+}
+
+/**
+ * Companion object for [[StreamingShuffleReader]] providing shared infrastructure.
+ *
+ * Contains a dedicated thread pool for enforcing the streaming-specific connection
+ * timeout on remote block fetch operations. The pool uses daemon threads to ensure
+ * clean JVM shutdown, and a cached thread pool to handle variable concurrency from
+ * multiple concurrent streaming shuffle reads.
+ */
+private[spark] object StreamingShuffleReader {
+  /**
+   * Dedicated thread pool for enforcing the streaming-specific connection timeout
+   * (5 seconds) on remote block fetch operations. The default
+   * {@code spark.network.timeout} (120 seconds) is too long for streaming shuffle's
+   * real-time producer failure detection requirement.
+   *
+   * Uses a cached daemon thread pool that grows/shrinks with demand. Threads are
+   * daemon threads to ensure clean JVM shutdown without explicit lifecycle management.
+   */
+  private[streaming] val fetchTimeoutExecutor: java.util.concurrent.ExecutorService =
+    java.util.concurrent.Executors.newCachedThreadPool(
+      ThreadUtils.namedThreadFactory("streaming-shuffle-fetch-timeout"))
 }

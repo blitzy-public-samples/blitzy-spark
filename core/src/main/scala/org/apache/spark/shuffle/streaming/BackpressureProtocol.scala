@@ -224,6 +224,28 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
    */
   @volatile private var tokenBucket: TokenBucket = createTokenBucket()
 
+  // ========== Bandwidth Acquisition (Public API) ==========
+
+  /**
+   * Attempts to acquire bandwidth tokens for transmitting the specified number
+   * of bytes through the streaming shuffle transport.
+   *
+   * This is the public entry point for rate limiting enforcement by the
+   * [[StreamingShuffleWriter]] and [[StreamingShuffleReader]]. The method
+   * delegates to the internal [[TokenBucket]] which is calibrated at
+   * `maxBandwidthMBps / numConcurrentShuffles` refill rate.
+   *
+   * When `maxBandwidthMBps` is 0 (unlimited), this method always returns true.
+   *
+   * Thread-safe: uses CAS operations on the internal AtomicLong token counter.
+   *
+   * @param bytes Number of bytes to transmit (must be non-negative)
+   * @return true if bandwidth tokens were acquired, false if rate-limited
+   */
+  def tryAcquireBandwidth(bytes: Long): Boolean = {
+    tokenBucket.tryConsume(bytes)
+  }
+
   // ========== Heartbeat-Based Consumer Liveness Detection ==========
 
   /**

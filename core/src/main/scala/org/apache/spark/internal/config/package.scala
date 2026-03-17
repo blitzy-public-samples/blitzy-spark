@@ -1772,6 +1772,7 @@ package object config {
         "Set to 0 for unlimited bandwidth.")
       .version("4.1.0")
       .intConf
+      .checkValue(_ >= 0, "maxBandwidthMBps must be non-negative")
       .createWithDefault(0)
 
   private[spark] val SHUFFLE_STREAMING_DEBUG =

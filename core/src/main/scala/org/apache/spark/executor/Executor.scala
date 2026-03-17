@@ -159,6 +159,20 @@ private[spark] class Executor(
       None
     }
 
+  /**
+   * Streaming shuffle metrics source, stored as a class-level field so that
+   * streaming shuffle components (StreamingShuffleManager, Writer, Reader) can
+   * access and update its AtomicLong gauges. Only present when streaming shuffle
+   * is enabled via spark.shuffle.streaming.enabled=true.
+   * Coexistence: None when streaming shuffle is disabled (the default).
+   */
+  val streamingShuffleMetricsSource: Option[StreamingShuffleMetricsSource] =
+    if (conf.get(SHUFFLE_STREAMING_ENABLED)) {
+      Some(new StreamingShuffleMetricsSource())
+    } else {
+      None
+    }
+
   if (!isLocal) {
     env.blockManager.initialize(conf.getAppId)
     env.metricsSystem.registerSource(executorSource)
@@ -168,10 +182,7 @@ private[spark] class Executor(
     // Register streaming shuffle metrics source when streaming shuffle is enabled.
     // Coexistence: streaming metrics are only registered when opt-in streaming shuffle is active,
     // following the ExecutorMetricsSource registration pattern above.
-    if (conf.get(SHUFFLE_STREAMING_ENABLED)) {
-      val streamingShuffleMetricsSource = new StreamingShuffleMetricsSource()
-      streamingShuffleMetricsSource.register(env.metricsSystem)
-    }
+    streamingShuffleMetricsSource.foreach(_.register(env.metricsSystem))
   } else {
     // This enable the registration of the executor source in local mode.
     // The actual registration happens in SparkContext,
