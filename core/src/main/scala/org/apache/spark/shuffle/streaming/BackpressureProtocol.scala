@@ -98,7 +98,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
   /** Cumulative count of rate limit hit events for telemetry. */
   private val rateLimitHitCount = new AtomicLong(0L)
 
-  /** Lifecycle flag — true when the protocol is actively running. */
+  /** Lifecycle flag -- true when the protocol is actively running. */
   private val isRunning = new AtomicBoolean(false)
 
   // ========== Concurrent Collections ==========
@@ -213,7 +213,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
       val capacity = Math.max(1L, refillRateBytesPerMs * 1000L)
       new TokenBucket(capacity, refillRateBytesPerMs)
     } else {
-      // Unlimited bandwidth — use maximum possible token values
+      // Unlimited bandwidth -- use maximum possible token values
       new TokenBucket(Long.MaxValue / 2, Long.MaxValue / 2000)
     }
   }
@@ -254,7 +254,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
   def isConsumerAlive(consumerId: String): Boolean = {
     val lastHeartbeat = consumerHeartbeats.getOrDefault(consumerId, 0L)
     if (lastHeartbeat == 0L) {
-      // No heartbeat ever recorded — consumer is not known
+      // No heartbeat ever recorded -- consumer is not known
       false
     } else {
       val elapsed = System.currentTimeMillis() - lastHeartbeat
@@ -436,7 +436,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
 
     val thisPriority = shufflePriorities.get(shuffleId)
     if (thisPriority == null) {
-      // Unknown shuffle — grant full allocation as a safe default
+      // Unknown shuffle -- grant full allocation as a safe default
       return totalAvailableBytes
     }
 
@@ -447,7 +447,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
     }
 
     if (totalPrioritySum <= 0L) {
-      // All priorities are zero — distribute equally
+      // All priorities are zero -- distribute equally
       val numShuffles = Math.max(1L, activeShuffleCount.get())
       totalAvailableBytes / numShuffles
     } else {
@@ -503,7 +503,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
   /**
    * Starts the backpressure protocol.
    *
-   * Uses compareAndSet for idempotent start — calling start() multiple times
+   * Uses compareAndSet for idempotent start -- calling start() multiple times
    * has no effect after the first successful invocation. This method must be
    * called before any other protocol operations.
    */
@@ -518,7 +518,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
   /**
    * Stops the backpressure protocol and cleans up all tracked state.
    *
-   * Uses compareAndSet for idempotent stop — calling stop() multiple times
+   * Uses compareAndSet for idempotent stop -- calling stop() multiple times
    * has no effect after the first successful invocation. All consumer
    * heartbeat records, shuffle priority registrations, and buffer tracking
    * state are cleared to prevent memory leaks.
@@ -532,7 +532,7 @@ private[spark] class BackpressureProtocol(conf: SparkConf) extends Logging {
       shufflePriorities.clear()
       activeShuffleCount.set(0L)
       totalBufferBytes.set(0L)
-      logInfo("BackpressureProtocol stopped — all tracking state cleared")
+      logInfo("BackpressureProtocol stopped -- all tracking state cleared")
     }
   }
 
