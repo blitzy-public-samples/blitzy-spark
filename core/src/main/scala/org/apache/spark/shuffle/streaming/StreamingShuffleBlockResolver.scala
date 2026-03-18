@@ -56,6 +56,29 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
   extends ShuffleBlockResolver with Logging {
 
   /**
+   * Optional fallback [[ShuffleBlockResolver]] (typically the sort-based
+   * `IndexShuffleBlockResolver`) used when a requested block is not in the
+   * streaming in-memory cache. This enables coexistence with the sort-based
+   * shuffle path: when streaming shuffle is disabled for a particular shuffle
+   * and `SortShuffleManager` writes data via its own resolver, the streaming
+   * block resolver delegates to the fallback instead of throwing.
+   *
+   * Set via [[setFallbackResolver]] when the fallback `SortShuffleManager` is
+   * lazily initialized in [[StreamingShuffleManager]].
+   */
+  @volatile private var fallbackResolver: Option[ShuffleBlockResolver] = None
+
+  /**
+   * Registers a fallback block resolver for sort-based shuffle delegation.
+   *
+   * @param resolver The sort-based resolver (typically `IndexShuffleBlockResolver`)
+   */
+  def setFallbackResolver(resolver: ShuffleBlockResolver): Unit = {
+    fallbackResolver = Some(resolver)
+    logInfo(s"StreamingShuffleBlockResolver: fallback resolver set to ${resolver.getClass.getName}")
+  }
+
+  /**
    * In-memory block data cache mapping block identifiers to their raw byte arrays.
    * Entries are populated by [[putBlockData]] during streaming writes and removed
    * either explicitly via [[removeBlockData]] after consumer acknowledgment or
@@ -101,14 +124,27 @@ private[spark] class StreamingShuffleBlockResolver(conf: SparkConf)
       // for zero-copy delivery to the network transport layer
       new NioManagedBuffer(java.nio.ByteBuffer.wrap(cached))
     } else {
-      // Block not in memory -- this occurs when the block was already consumed and
-      // reclaimed, or was spilled to disk and must be fetched via BlockManager.
-      // Throwing here follows the ShuffleBlockResolver contract: "If the data for
-      // that block is not available, throws an unspecified exception."
-      throw new RuntimeException(
-        s"Streaming shuffle block $blockId not found in memory cache. " +
-        "The block may have been reclaimed after consumer acknowledgment or " +
-        "spilled to disk. Disk-spilled blocks should be retrieved through BlockManager.")
+      // Block not in the streaming memory cache. Before throwing, try the fallback
+      // resolver (sort-based IndexShuffleBlockResolver). This handles the coexistence
+      // scenario where streaming shuffle is disabled for a particular shuffle and
+      // the sort-based manager wrote data through its own resolver.
+      fallbackResolver match {
+        case Some(resolver) =>
+          try {
+            logDebug(s"Block $blockId not in streaming cache, delegating to fallback resolver")
+            resolver.getBlockData(blockId, dirs)
+          } catch {
+            case e: Exception =>
+              throw new RuntimeException(
+                s"Streaming shuffle block $blockId not found in memory cache and " +
+                s"fallback resolver also failed: ${e.getMessage}", e)
+          }
+        case None =>
+          throw new RuntimeException(
+            s"Streaming shuffle block $blockId not found in memory cache. " +
+            "The block may have been reclaimed after consumer acknowledgment or " +
+            "spilled to disk. Disk-spilled blocks should be retrieved through BlockManager.")
+      }
     }
   }
 

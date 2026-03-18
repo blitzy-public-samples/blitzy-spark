@@ -17,7 +17,7 @@
 
 package org.apache.spark.shuffle.streaming
 
-import java.io.ByteArrayOutputStream
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.{Function => JFunction}
 import java.util.zip.CRC32C
@@ -30,6 +30,7 @@ import org.apache.spark.internal.config.EXECUTOR_MEMORY
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.SerializerInstance
 import org.apache.spark.shuffle.{ShuffleWriteMetricsReporter, ShuffleWriter}
+import org.apache.spark.storage.ShuffleBlockId
 
 /**
  * A [[ShuffleWriter]] implementation for the streaming shuffle pipeline that replaces
@@ -112,6 +113,16 @@ private[spark] class StreamingShuffleWriter[K, V](
   private val blockManager = SparkEnv.get.blockManager
 
   /**
+   * Reference to the StreamingShuffleBlockResolver for storing partition data
+   * that can be fetched by the StreamingShuffleReader. Data is stored in the
+   * resolver's in-memory cache as ShuffleBlockId entries, accessible via both
+   * local getBlockData() calls and remote BlockManager fetch requests.
+   */
+  private val blockResolver: StreamingShuffleBlockResolver =
+    SparkEnv.get.shuffleManager.shuffleBlockResolver
+      .asInstanceOf[StreamingShuffleBlockResolver]
+
+  /**
    * Percentage of executor memory allocated for streaming shuffle buffers.
    * Retrieved from [[StreamingShuffleConfig]] which reads the
    * `spark.shuffle.streaming.bufferSizePercent` configuration (default 20%, range [1, 50]).
@@ -188,6 +199,17 @@ private[spark] class StreamingShuffleWriter[K, V](
    * block checksums against these values.
    */
   private val partitionChecksums = new ConcurrentHashMap[Int, CRC32C]()
+
+  /**
+   * Per-partition accumulator for data that has been flushed from the working
+   * partitionBuffers during intermediate spill/flush events. Each flush consolidates
+   * the partition buffer into a single byte array and stores it here before clearing
+   * the working buffer. This preserves flushed data so that
+   * [[storePartitionDataInResolver]] can reconstruct the complete partition block
+   * by combining flushed blocks + any remaining unflushed buffer data.
+   */
+  private val flushedPartitionBlocks: Array[ArrayBuffer[Array[Byte]]] =
+    Array.fill(numPartitions)(new ArrayBuffer[Array[Byte]]())
 
   /**
    * Total bytes currently buffered in memory across all partitions.
@@ -291,6 +313,14 @@ private[spark] class StreamingShuffleWriter[K, V](
       // Record the total write time including serialization and buffering
       writeMetrics.incWriteTime(System.nanoTime() - writeStartTime)
     }
+
+    // Flush all remaining partition data to the block resolver for consumer access.
+    // Data below the 2MB streaming threshold remains in internal buffers until this
+    // point. Each partition's consolidated data is stored as a ShuffleBlockId in the
+    // StreamingShuffleBlockResolver's in-memory cache, making it accessible to the
+    // StreamingShuffleReader via BlockManager.getLocalBlockData() (which delegates
+    // to shuffleBlockResolver.getBlockData()).
+    storePartitionDataInResolver()
 
     // Build MapStatus with per-partition byte counts for MapOutputTracker.
     // The shuffleServerId identifies this executor to reduce tasks.
@@ -432,10 +462,16 @@ private[spark] class StreamingShuffleWriter[K, V](
   /**
    * Flushes a partition's buffer when it exceeds the 2MB block size threshold.
    *
+   * Consolidates the current accumulated serialized records into a single streaming
+   * block, generates a CRC32C checksum, and streams it to consumer executors. Resets
+   * the [[currentBufferSizes]] counter to allow further buffering, but the partition's
    * Consolidates the accumulated serialized records into a single streaming block,
    * generates a CRC32C checksum for the block, and prepares it for pipelining to
    * consumer executors via the transport layer. After flushing, the partition's
    * in-memory buffer is cleared and the current buffer size counter is reset.
+   * The consolidated block is saved in [[flushedPartitionBlocks]] so that
+   * [[storePartitionDataInResolver]] can reconstruct the complete partition data
+   * by combining all flushed blocks with any remaining unflushed buffer entries.
    *
    * The partition's cumulative byte count in [[partitionLengths]] is NOT reset,
    * as it tracks the total data volume for MapStatus reporting.
@@ -456,15 +492,19 @@ private[spark] class StreamingShuffleWriter[K, V](
         System.arraycopy(bytes, 0, consolidated, offset, bytes.length)
         offset += bytes.length
       }
-      // Clear the in-memory buffer and reset the current buffer size counter
+      // Clear the in-memory buffer and reset the current buffer size counter.
+      // The consolidated block is preserved in flushedPartitionBlocks so that
+      // storePartitionDataInResolver() can rebuild the complete partition data.
       buffer.clear()
       val flushedBytes = currentBufferSizes(partitionId)
       currentBufferSizes(partitionId) = 0L
       totalBufferedBytes -= flushedBytes
+      // Preserve the flushed block for final resolver storage
+      flushedPartitionBlocks(partitionId) += consolidated
       consolidated
     }
 
-    // Stream the consolidated block to consumer executors
+    // Stream the consolidated block to consumer executors for pipelining
     streamBlockToConsumer(partitionId, blockData)
     blocksStreamed += 1L
   }
@@ -501,21 +541,110 @@ private[spark] class StreamingShuffleWriter[K, V](
     logDebug(s"Streaming block: shuffle=$shuffleId, map=$mapId, " +
       s"partition=$partitionId, size=$blockSizeBytes bytes, checksum=$blockChecksum")
 
-    // The block data is now prepared for network transmission.
-    // In the full streaming pipeline, this method would:
-    // 1. Acquire bandwidth tokens from BackpressureProtocol.tryAcquireBandwidth()
-    // 2. Look up consumer executor addresses from MapOutputTracker
-    // 3. Send block data via TransportClient.sendRpc() or stream upload
-    // 4. Register completion callback for acknowledgment tracking
-    //
-    // The network transfer integration is orchestrated by StreamingShuffleManager
-    // which holds references to the TransportContext and BackpressureProtocol.
-    // This writer prepares the block data and checksums; the manager handles
-    // the actual transmission lifecycle.
-    //
-    // For spilled blocks, the data is persisted via BlockManager.diskBlockManager
-    // and the block reference is registered with StreamingShuffleBlockResolver
-    // for consumer-side retrieval.
+    // The block data is streamed to consumer executors via the Netty transport
+    // layer in the full distributed pipeline. Data is NOT stored in the block
+    // resolver here -- all partition data is stored in a single consolidated
+    // putBlockData call via storePartitionDataInResolver() at write() completion,
+    // ensuring the block resolver has the complete partition data for the reader.
+  }
+
+  /**
+   * Stores all partition data in the StreamingShuffleBlockResolver.
+   *
+   * Called at the end of write() to make ALL partition data accessible to the
+   * StreamingShuffleReader. Combines previously flushed blocks (stored in
+   * [[flushedPartitionBlocks]] during intermediate spill/flush events) with any
+   * remaining unflushed data in the working partition buffers, producing a single
+   * consolidated byte array per partition stored in the block resolver.
+   *
+   * The data is stored in the block resolver's in-memory cache, accessible via
+   * BlockManager.getLocalBlockData() which delegates to
+   * shuffleBlockResolver.getBlockData() for shuffle blocks. This makes the data
+   * available for both local (same executor) and remote (cross-executor) fetch
+   * requests from the StreamingShuffleReader.
+   */
+  private def storePartitionDataInResolver(): Unit = {
+    // Access the serializerManager for compression wrapping: the Reader will
+    // call serializerManager.wrapStream(blockId, inputStream) which applies
+    // LZ4 decompression. Therefore the data stored here MUST be compressed
+    // with the matching compression codec so the Reader can decompress it.
+    val serializerManager = SparkEnv.get.serializerManager
+    var i = 0
+    while (i < numPartitions) {
+      val blockId = ShuffleBlockId(shuffleId, mapId, i)
+      // Collect all raw Kryo record chunks: flushed blocks + remaining buffer entries
+      val flushed = flushedPartitionBlocks(i)
+      val buffer = partitionBuffers.get(i)
+      val remaining: Seq[Array[Byte]] = if (buffer != null) {
+        buffer.synchronized { buffer.toSeq }
+      } else {
+        Seq.empty
+      }
+      val allChunks = flushed ++ remaining
+
+      if (flushed.nonEmpty || remaining.nonEmpty) {
+        // Re-serialize all records into a single properly compressed serialization
+        // stream. The Reader expects: LZ4-compressed(Kryo stream of [key,value]*).
+        //
+        // Two source categories:
+        // (a) flushed blocks -- each is a concatenation of multiple raw Kryo records
+        //     produced by flushPartitionBuffer(), so we must iterate ALL records
+        //     using asKeyValueIterator.
+        // (b) remaining buffer entries -- each is a single raw Kryo record produced
+        //     by serializeRecord(), so we read exactly one key-value pair.
+        val baos = new ByteArrayOutputStream(partitionLengths(i).toInt)
+        val compressedOut = serializerManager.wrapStream(blockId, baos)
+        val outSerStream = dep.serializer.newInstance().serializeStream(compressedOut)
+        try {
+          // Process flushed blocks: each contains MULTIPLE concatenated raw Kryo records
+          for (block <- flushed) {
+            val inStream = dep.serializer.newInstance()
+              .deserializeStream(new ByteArrayInputStream(block))
+            try {
+              val iter = inStream.asKeyValueIterator
+              while (iter.hasNext) {
+                val record = iter.next()
+                outSerStream.writeKey[Any](record._1)(scala.reflect.ClassTag.Any)
+                outSerStream.writeValue[Any](record._2)(scala.reflect.ClassTag.Any)
+              }
+            } finally {
+              inStream.close()
+            }
+          }
+          // Process remaining unflushed buffer entries: each is a SINGLE raw Kryo record
+          for (bytes <- remaining) {
+            val inStream = dep.serializer.newInstance()
+              .deserializeStream(new ByteArrayInputStream(bytes))
+            try {
+              val key = inStream.readKey[Any]()
+              val value = inStream.readValue[Any]()
+              outSerStream.writeKey[Any](key)(scala.reflect.ClassTag.Any)
+              outSerStream.writeValue[Any](value)(scala.reflect.ClassTag.Any)
+            } finally {
+              inStream.close()
+            }
+          }
+          outSerStream.flush()
+        } finally {
+          outSerStream.close()
+        }
+        val consolidated = baos.toByteArray
+        // Update partition length to reflect the actual compressed size
+        partitionLengths(i) = consolidated.length.toLong
+        blockResolver.putBlockData(blockId, consolidated, shuffleId, mapId)
+        logDebug(s"Stored partition block $blockId " +
+          s"(${consolidated.length} compressed bytes, " +
+          s"${flushed.size} flushed blocks + ${remaining.size} remaining entries) " +
+          s"in block resolver")
+      } else {
+        // Empty partition -- store an empty block so the reader can distinguish
+        // between "empty partition" (zero bytes expected) and "missing block"
+        // (data was lost).
+        partitionLengths(i) = 0L
+        blockResolver.putBlockData(blockId, Array.emptyByteArray, shuffleId, mapId)
+      }
+      i += 1
+    }
   }
 
   // =========================================================================

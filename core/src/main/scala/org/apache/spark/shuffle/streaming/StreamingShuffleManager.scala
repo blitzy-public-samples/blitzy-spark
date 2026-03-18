@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle._
+import org.apache.spark.util.Utils
 import org.apache.spark.util.collection.OpenHashSet
 
 /**
@@ -67,7 +68,7 @@ import org.apache.spark.util.collection.OpenHashSet
  *
  * ==Isolation==
  * All streaming logic is self-contained within the `org.apache.spark.shuffle.streaming`
- * package. There are zero imports from `org.apache.spark.shuffle.sort` — the sort-based
+ * package. There are zero imports from `org.apache.spark.shuffle.sort` -- the sort-based
  * implementation is completely unaffected by this class.
  *
  * @param conf SparkConf for accessing streaming shuffle configuration parameters
@@ -80,7 +81,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   extends ShuffleManager with Logging {
 
   // ===========================================================================
-  // Internal State — Task ID Tracking
+  // Internal State -- Task ID Tracking
   // ===========================================================================
 
   /**
@@ -88,7 +89,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
    * for those shuffles. Used during [[unregisterShuffle]] to clean up per-map-task
    * resources (spilled blocks, cached data).
    *
-   * Same pattern as `SortShuffleManager.taskIdMapsForShuffle` — the
+   * Same pattern as `SortShuffleManager.taskIdMapsForShuffle` -- the
    * [[ConcurrentHashMap]] provides safe concurrent put/remove from multiple executor
    * threads, while individual [[OpenHashSet]] operations are protected by
    * `synchronized` blocks on the set instance.
@@ -96,7 +97,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   private[this] val taskIdMapsForShuffle = new ConcurrentHashMap[Int, OpenHashSet[Long]]()
 
   // ===========================================================================
-  // Internal State — Metrics Source
+  // Internal State -- Metrics Source
   // ===========================================================================
 
   /**
@@ -108,14 +109,14 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   @volatile private var streamingMetricsSource: Option[StreamingShuffleMetricsSource] = None
 
   // ===========================================================================
-  // Internal State — Fallback Condition Tracking
+  // Internal State -- Fallback Condition Tracking
   // ===========================================================================
 
   /**
    * Whether the automatic fallback to sort-based shuffle has been activated.
    * Once set to `true`, all subsequent [[registerShuffle]] calls return
    * [[BaseShuffleHandle]] instead of [[StreamingShuffleHandle]]. This is a
-   * one-way flag — once activated, fallback persists for the executor's lifetime
+   * one-way flag -- once activated, fallback persists for the executor's lifetime
    * (configuration changes require executor restart per AAP v1 constraint).
    */
   private val fallbackActivated = new AtomicBoolean(false)
@@ -164,6 +165,30 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
    */
   override val shuffleBlockResolver: StreamingShuffleBlockResolver =
     new StreamingShuffleBlockResolver(conf)
+
+  /**
+   * Lazily-initialized fallback [[ShuffleManager]] (SortShuffleManager) for handling
+   * [[BaseShuffleHandle]] instances when streaming shuffle is disabled or falls back.
+   *
+   * Created via reflection to avoid any direct import dependency on the
+   * `org.apache.spark.shuffle.sort` package, maintaining zero cross-contamination
+   * as required by the architectural isolation constraint.
+   *
+   * The fallback manager reuses the same SparkConf and isDriver flag, ensuring
+   * consistent configuration between the streaming and sort-based code paths.
+   */
+  @volatile private var fallbackSortInitialized: Boolean = false
+
+  private lazy val fallbackSortManager: ShuffleManager = {
+    val mgr = Utils.instantiateSerializerOrShuffleManager[ShuffleManager](
+      "org.apache.spark.shuffle.sort.SortShuffleManager", conf, isDriver)
+    fallbackSortInitialized = true
+    // Wire the fallback manager's block resolver into the streaming resolver so
+    // that blocks written by the sort-based path can be resolved when
+    // BlockManager calls our shuffleBlockResolver.getBlockData().
+    shuffleBlockResolver.setFallbackResolver(mgr.shuffleBlockResolver)
+    mgr
+  }
 
   // ===========================================================================
   // ShuffleManager Trait Implementation
@@ -245,15 +270,18 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
           context,
           metrics,
           conf)
+      case base: BaseShuffleHandle[K @unchecked, V @unchecked, _] =>
+        // Fallback path: delegate to the sort-based SortShuffleManager for
+        // BaseShuffleHandle instances. This occurs when streaming shuffle is
+        // disabled or when runtime fallback conditions have been detected.
+        logDebug(s"Delegating getWriter for shuffle ${handle.shuffleId} to " +
+          "fallback SortShuffleManager (BaseShuffleHandle)")
+        fallbackSortManager.getWriter(base, mapId, context, metrics)
       case other =>
-        // This should not occur if registerShuffle correctly returned a
-        // StreamingShuffleHandle. Guard against programming errors or handle
-        // serialization issues.
         throw new SparkException(
           s"StreamingShuffleManager.getWriter received unexpected ShuffleHandle type: " +
-          s"${other.getClass.getName}. Expected StreamingShuffleHandle for shuffle " +
-          s"${handle.shuffleId}. This may indicate a configuration mismatch between " +
-          s"driver and executor shuffle manager settings.")
+          s"${other.getClass.getName}. Expected StreamingShuffleHandle or " +
+          s"BaseShuffleHandle for shuffle ${handle.shuffleId}.")
     }
   }
 
@@ -286,19 +314,29 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
       endPartition: Int,
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
-    val streamingHandle = handle.asInstanceOf[StreamingShuffleHandle[K, _, C]]
-    // Query MapOutputTracker for shuffle block locations.
-    // Same pattern as SortShuffleManager.getReader (lines 134-136).
-    // Streaming shuffle does NOT use getPushBasedShuffleMapSizesByExecutorId
-    // since it operates on a completely separate data path from push-based shuffle.
-    val blocksByAddress = SparkEnv.get.mapOutputTracker.getMapSizesByExecutorId(
-      handle.shuffleId, startMapIndex, endMapIndex, startPartition, endPartition)
-    new StreamingShuffleReader[K, C](
-      streamingHandle,
-      blocksByAddress,
-      context,
-      metrics,
-      conf)
+    handle match {
+      case streamingHandle: StreamingShuffleHandle[K @unchecked, _, C @unchecked] =>
+        // Query MapOutputTracker for shuffle block locations.
+        // Same pattern as SortShuffleManager.getReader (lines 134-136).
+        // Streaming shuffle does NOT use getPushBasedShuffleMapSizesByExecutorId
+        // since it operates on a completely separate data path from push-based shuffle.
+        val blocksByAddress = SparkEnv.get.mapOutputTracker.getMapSizesByExecutorId(
+          handle.shuffleId, startMapIndex, endMapIndex, startPartition, endPartition)
+        new StreamingShuffleReader[K, C](
+          streamingHandle,
+          blocksByAddress,
+          context,
+          metrics,
+          conf)
+      case _ =>
+        // Fallback path: delegate to the sort-based SortShuffleManager for
+        // BaseShuffleHandle instances (when streaming is disabled or fell back).
+        logDebug(s"Delegating getReader for shuffle ${handle.shuffleId} to " +
+          "fallback SortShuffleManager")
+        fallbackSortManager.getReader(
+          handle, startMapIndex, endMapIndex, startPartition, endPartition,
+          context, metrics)
+    }
   }
 
   /**
@@ -324,6 +362,13 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
           shuffleBlockResolver.removeDataByMap(shuffleId, mapTaskId)
         }
       }
+    }
+    // Also delegate to the fallback sort manager if it has been initialized,
+    // to clean up any sort-based shuffle state for BaseShuffleHandle shuffles.
+    // The fallbackSortInitialized flag avoids triggering lazy initialization
+    // of fallbackSortManager when it was never used.
+    if (fallbackSortInitialized) {
+      fallbackSortManager.unregisterShuffle(shuffleId)
     }
     logDebug(s"Unregistered streaming shuffle $shuffleId")
     true
@@ -409,7 +454,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
         return true
       }
     } else {
-      // Consumer speed is acceptable — reset the slowdown timer
+      // Consumer speed is acceptable -- reset the slowdown timer
       consumerSlowdownStartNanos = System.nanoTime()
     }
 
@@ -417,7 +462,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   }
 
   // ===========================================================================
-  // Runtime Condition Reporting — Called by Streaming Components
+  // Runtime Condition Reporting -- Called by Streaming Components
   // ===========================================================================
 
   /**
@@ -517,7 +562,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   }
 
   // ===========================================================================
-  // Metrics Delegation — Facade for Streaming Components
+  // Metrics Delegation -- Facade for Streaming Components
   // ===========================================================================
 
   /**

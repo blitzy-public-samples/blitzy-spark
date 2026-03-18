@@ -303,12 +303,15 @@ private[spark] class StreamingShuffleReader[K, C](
    * Fetches a single block from a producer with the streaming-specific connection
    * timeout ({@code connectionTimeoutMs} = 5 seconds) for producer failure detection.
    *
-   * The default {@code spark.network.timeout} (120 seconds) is too long for streaming
-   * shuffle's real-time producer failure detection requirement. This method wraps the
-   * [[org.apache.spark.storage.BlockManager BlockManager]]'s remote fetch in a
-   * dedicated thread with explicit timeout enforcement, converting timeout to
-   * [[IOException]] to trigger the [[FetchFailedException]] path for DAG
-   * recomputation.
+   * The fetch strategy is two-tier:
+   *  1. '''Local fetch''': If the block address matches the local BlockManager (same
+   *     executor or local mode), the block is fetched directly from the
+   *     [[StreamingShuffleBlockResolver]] via
+   *     [[org.apache.spark.storage.BlockManager.getLocalBlockData]]. This is a zero-copy,
+   *     zero-network operation that returns the in-memory cached block data.
+   *  2. '''Remote fetch''': If the block is on a different executor, a timeout-wrapped
+   *     remote fetch is used via [[org.apache.spark.storage.BlockManager.getRemoteBytes]].
+   *     The 5-second streaming timeout is enforced via a dedicated executor thread.
    *
    * For streaming shuffle blocks (max 2MB), the byte array conversion is safe
    * and efficient -- well within JVM array size limits.
@@ -324,7 +327,31 @@ private[spark] class StreamingShuffleReader[K, C](
       address: BlockManagerId,
       blockId: BlockId,
       expectedSize: Long): Array[Byte] = {
-    // Submit the remote fetch to a dedicated thread pool for timeout enforcement.
+    // Tier 1: Local fetch -- check if the block is on the same executor.
+    // In local mode (local[N]), all tasks share the same BlockManager,
+    // so all shuffle blocks are local. BlockManager.getLocalBlockData()
+    // delegates to shuffleBlockResolver.getBlockData() for shuffle blocks,
+    // returning data from the StreamingShuffleBlockResolver's in-memory cache.
+    if (address == blockManager.blockManagerId ||
+        address.host == blockManager.blockManagerId.host &&
+        address.port == blockManager.blockManagerId.port) {
+      try {
+        val managedBuffer = blockManager.getLocalBlockData(blockId)
+        val nioBuffer = managedBuffer.nioByteBuffer()
+        val bytes = new Array[Byte](nioBuffer.remaining())
+        nioBuffer.get(bytes)
+        logDebug(s"Locally fetched ${bytes.length} bytes for block $blockId " +
+          s"(expected $expectedSize bytes)")
+        return bytes
+      } catch {
+        case e: Exception =>
+          logDebug(s"Local fetch failed for block $blockId, " +
+            s"falling through to remote fetch: ${e.getMessage}")
+          // Fall through to remote fetch below
+      }
+    }
+
+    // Tier 2: Remote fetch with streaming-specific timeout enforcement.
     // blockManager.getRemoteBytes() uses the global spark.network.timeout (default
     // 120s), but streaming shuffle requires the AAP-specified 5-second timeout for
     // producer failure detection. This wrapper enforces the streaming-specific
