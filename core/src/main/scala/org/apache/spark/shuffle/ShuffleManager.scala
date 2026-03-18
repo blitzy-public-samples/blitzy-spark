@@ -21,6 +21,7 @@ import java.util.Locale
 
 import org.apache.spark.{ShuffleDependency, SparkConf, TaskContext}
 import org.apache.spark.internal.config
+import org.apache.spark.shuffle.streaming.StreamingShuffleManager
 import org.apache.spark.util.Utils
 
 /**
@@ -111,7 +112,8 @@ private[spark] object ShuffleManager {
   def getShuffleManagerClassName(conf: SparkConf): String = {
     val shortShuffleMgrNames = Map(
       "sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName,
-      "tungsten-sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName)
+      "tungsten-sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName,
+      "streaming" -> classOf[StreamingShuffleManager].getName)
 
     val shuffleMgrName = conf.get(config.SHUFFLE_MANAGER)
     shortShuffleMgrNames.getOrElse(shuffleMgrName.toLowerCase(Locale.ROOT), shuffleMgrName)
