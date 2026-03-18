@@ -484,7 +484,7 @@ private[spark] class StreamingShuffleWriter[K, V](
 
     val blockData = buffer.synchronized {
       if (buffer.isEmpty) return
-      // Consolidate all buffered byte arrays into a single block
+      // Consolidate all buffered byte arrays into a single block for streaming
       val totalSize = currentBufferSizes(partitionId).toInt
       val consolidated = new Array[Byte](totalSize)
       var offset = 0
@@ -492,15 +492,18 @@ private[spark] class StreamingShuffleWriter[K, V](
         System.arraycopy(bytes, 0, consolidated, offset, bytes.length)
         offset += bytes.length
       }
+      // Preserve individual record byte arrays for final resolver storage.
+      // Each entry is a complete serialization stream from serializeRecord(),
+      // and storePartitionDataInResolver() deserializes each one individually.
+      // Storing them separately (rather than the concatenated block) avoids
+      // StreamCorruptedException when deserializing, since concatenating
+      // multiple complete serialization streams produces an invalid single stream.
+      flushedPartitionBlocks(partitionId) ++= buffer
       // Clear the in-memory buffer and reset the current buffer size counter.
-      // The consolidated block is preserved in flushedPartitionBlocks so that
-      // storePartitionDataInResolver() can rebuild the complete partition data.
       buffer.clear()
       val flushedBytes = currentBufferSizes(partitionId)
       currentBufferSizes(partitionId) = 0L
       totalBufferedBytes -= flushedBytes
-      // Preserve the flushed block for final resolver storage
-      flushedPartitionBlocks(partitionId) += consolidated
       consolidated
     }
 
@@ -584,35 +587,18 @@ private[spark] class StreamingShuffleWriter[K, V](
 
       if (flushed.nonEmpty || remaining.nonEmpty) {
         // Re-serialize all records into a single properly compressed serialization
-        // stream. The Reader expects: LZ4-compressed(Kryo stream of [key,value]*).
+        // stream. The Reader expects: LZ4-compressed(serializer stream of [key,value]*).
         //
-        // Two source categories:
-        // (a) flushed blocks -- each is a concatenation of multiple raw Kryo records
-        //     produced by flushPartitionBuffer(), so we must iterate ALL records
-        //     using asKeyValueIterator.
-        // (b) remaining buffer entries -- each is a single raw Kryo record produced
-        //     by serializeRecord(), so we read exactly one key-value pair.
+        // Both flushed and remaining entries are individual serialized records
+        // produced by serializeRecord(). Each is a complete serialization stream
+        // containing exactly one key-value pair. We deserialize each individually
+        // and re-serialize into a single consolidated, compressed output stream.
         val baos = new ByteArrayOutputStream(partitionLengths(i).toInt)
         val compressedOut = serializerManager.wrapStream(blockId, baos)
         val outSerStream = dep.serializer.newInstance().serializeStream(compressedOut)
         try {
-          // Process flushed blocks: each contains MULTIPLE concatenated raw Kryo records
-          for (block <- flushed) {
-            val inStream = dep.serializer.newInstance()
-              .deserializeStream(new ByteArrayInputStream(block))
-            try {
-              val iter = inStream.asKeyValueIterator
-              while (iter.hasNext) {
-                val record = iter.next()
-                outSerStream.writeKey[Any](record._1)(scala.reflect.ClassTag.Any)
-                outSerStream.writeValue[Any](record._2)(scala.reflect.ClassTag.Any)
-              }
-            } finally {
-              inStream.close()
-            }
-          }
-          // Process remaining unflushed buffer entries: each is a SINGLE raw Kryo record
-          for (bytes <- remaining) {
+          // Process all chunks uniformly — each is a single serialized record
+          for (bytes <- allChunks) {
             val inStream = dep.serializer.newInstance()
               .deserializeStream(new ByteArrayInputStream(bytes))
             try {
