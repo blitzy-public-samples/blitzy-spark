@@ -345,14 +345,14 @@ The following timing parameters govern the streaming shuffle protocol:
     <td>Pipelining efficiency for network transfers</td>
   </tr>
   <tr>
-    <td>Retry base interval</td>
-    <td>1 second</td>
-    <td>Exponential backoff starting point for retransmission</td>
+    <td>Retry wait interval (transport layer)</td>
+    <td>5 seconds</td>
+    <td>Wait time between retry attempts, managed by the Netty transport layer (not configurable by streaming shuffle)</td>
   </tr>
   <tr>
-    <td>Max retry attempts</td>
-    <td>5</td>
-    <td>Maximum retransmission attempts per block before failure</td>
+    <td>Max retry attempts (transport layer)</td>
+    <td>3</td>
+    <td>Maximum fetch retry attempts per block before failure, managed by the Netty transport layer (not configurable by streaming shuffle)</td>
   </tr>
   <tr>
     <td>Memory spill polling interval</td>
@@ -376,16 +376,23 @@ The following timing parameters govern the streaming shuffle protocol:
 The streaming shuffle uses the following protocol for transferring data blocks from producer to
 consumer:
 
-1. **Block Construction**: The producer serializes records into 2 MB blocks. A CRC32C checksum is
-   computed over the block payload and appended to the block header.
+1. **Block Construction**: The producer serializes records into 2 MB blocks. A CRC32C checksum
+   fingerprint is computed over the block payload for integrity tracing.
 
 2. **Block Transmission**: Blocks are transmitted via the existing Netty-based transport layer using
    `TransportClient.sendRpc()` or stream upload. The transport layer handles framing, connection
    management, and TCP-level reliability.
 
-3. **Checksum Validation**: Upon receipt, the consumer recomputes the CRC32C checksum over the
-   received payload and compares it with the producer's checksum. If the checksums do not match, the
-   consumer requests retransmission of the corrupted block.
+3. **Checksum Validation**: Upon receipt, the consumer computes a CRC32C checksum over the received
+   payload and validates the block through size deviation analysis. If the received data size
+   deviates by more than 50% from the expected size reported by the `MapOutputTracker`, the block
+   is treated as corrupted and a `FetchFailedException` is thrown to trigger DAG recomputation.
+
+   > **Note (v1):** In the current implementation, the consumer validates block integrity through
+   > size-based deviation analysis. The CRC32C checksum is computed as a fingerprint for diagnostic
+   > tracing but is not compared against a producer-supplied expected checksum value. Full end-to-end
+   > CRC32C comparison against producer-embedded checksums is planned for a future version (see
+   > [v1 Architecture](#v1-architecture-in-memory-store-and-fetch-pipeline)).
 
 4. **Acknowledgment**: After successful validation, the consumer sends an acknowledgment message
    containing the byte offset of the last successfully received position. The producer uses this
@@ -396,14 +403,17 @@ consumer:
 
 ## Retry Policy
 
-The streaming shuffle uses exponential backoff for retransmission and reconnection:
+Retry logic for the streaming shuffle is delegated to the Netty transport layer. The streaming
+shuffle reader does not implement custom retry or exponential backoff logic. On a block fetch
+failure (IOException or connection timeout), the reader immediately throws a
+`FetchFailedException` to trigger DAG recomputation:
 
-- **Backoff schedule**: 1s, 2s, 4s, 8s, 16s (doubling with each attempt, up to 5 attempts maximum)
-- **Applies to**: Block retransmission after checksum failure, and connection re-establishment after
-  timeout
-- **Terminal failure**: After 5 consecutive failed attempts, the reader throws a
-  `FetchFailedException` which propagates to the `DAGScheduler` to trigger recomputation of the
-  upstream `ShuffleMapStage`
+- **Transport-layer retries**: The underlying Netty transport layer retries failed block fetches
+  up to **3 times** with a **5-second** wait between attempts. These are transport-level defaults
+  and are not configurable by the streaming shuffle.
+- **Terminal failure**: After transport-layer retries are exhausted, or on an immediate IOException
+  in the streaming reader, a `FetchFailedException` is thrown which propagates to the
+  `DAGScheduler` to trigger recomputation of the upstream `ShuffleMapStage`.
 
 # Failure Handling
 
@@ -566,8 +576,8 @@ The following conditions trigger automatic fallback to the sort-based shuffle:
   the streaming path if their conditions are healthy.
 - In-flight streaming shuffles complete gracefully or spill all buffered data to disk before the
   fallback takes effect for new shuffle registrations.
-- Fallback events are logged at **WARN** level. Check executor logs for messages containing
-  `"Falling back to sort-based shuffle"` to identify when fallback is activated.
+- Fallback events are logged at **ERROR** level. Check executor logs for messages containing
+  `"Streaming shuffle fallback triggered"` to identify when fallback is activated.
 - See the [Streaming Shuffle Troubleshooting](streaming-shuffle-troubleshooting.html) guide for
   resolution steps when fallback is triggered.
 

@@ -144,8 +144,9 @@ and validated by the reader upon receipt.
 ### Symptoms
 
 - Elevated `shuffle.streaming.checksumFailures` counter (if exposed in custom telemetry)
-- Log messages: `"Checksum mismatch for block X"` at WARN level
-- Automatic retransmission requests from the reader to the writer
+- Log messages: `"CRC32C validation failed for block <id>"` at ERROR level (thrown as IOException)
+- `FetchFailedException` propagated to the DAGScheduler, triggering recomputation of the upstream
+  `ShuffleMapStage`
 
 ### Resolution
 
@@ -156,9 +157,11 @@ and validated by the reader upon receipt.
    the JVM is under severe memory pressure. Review GC logs for stop-the-world pauses exceeding
    100ms during active shuffle periods.
 
-3. **Understand the retry mechanism.** Blocks with failed checksums are automatically
-   retransmitted using exponential backoff (starting at 1 second, maximum 5 attempts). Transient
-   corruption is typically resolved by retransmission without operator intervention.
+3. **Understand the failure handling mechanism.** On checksum failure, the streaming shuffle
+   reader throws a `FetchFailedException` which triggers DAG recomputation of the upstream
+   `ShuffleMapStage`. The Netty transport layer provides its own retry mechanism (up to 3
+   attempts with 5-second intervals) for transient network errors before the reader-level
+   failure path is reached.
 
 4. **If persistent, fall back to sort-based shuffle.** If checksum failures persist after
    addressing network and JVM issues, switch back to `spark.shuffle.manager=sort` to use the
@@ -205,9 +208,10 @@ The following conditions trigger automatic fallback:
 
 4. **Check logs for fallback messages.** Search executor logs for:
    ```
-   WARN StreamingShuffleManager: Falling back to sort-based shuffle
+   ERROR StreamingShuffleManager: Streaming shuffle fallback triggered
    ```
-   The log message includes the shuffle ID and the specific condition that triggered fallback.
+   The log message includes the specific condition that triggered fallback (e.g., memory
+   pressure, network saturation, or consumer slowdown).
 
 # Telemetry Interpretation
 
@@ -318,12 +322,12 @@ messages to diagnose specific conditions:
 
 | Log Message | Level | Component | Meaning |
 |---|---|---|---|
-| `StreamingShuffleManager initialized` | INFO | StreamingShuffleManager | Streaming shuffle manager loaded and activated successfully (planned — emitted when StreamingShuffleManager is created) |
+| `StreamingShuffleManager initialized` | INFO | StreamingShuffleManager | Streaming shuffle manager loaded and activated successfully. Emitted during manager construction. |
 | `Spill triggered: allocated=<bytes> bytes >= ...` | INFO | MemorySpillManager | Buffer occupancy exceeded the configured `spillThreshold`; disk spill initiated for the largest buffered partition |
 | `backpressureEvent: shuffle=<id> reason=<reason> ...` | INFO | BackpressureProtocol | Backpressure condition detected for a specific shuffle; includes reason (e.g., consumer slowdown, rate limit) and current metrics |
-| `Streaming shuffle producer failure detected for block <id> from <host>:<port>: <message>` | WARN | StreamingShuffleReader | Connection timeout or IOException during block fetch; producer executor presumed failed; partial reads invalidated and FetchFailedException thrown for DAG recomputation |
+| `Streaming shuffle producer failure detected for block <id> from <host>:<port>: <message>` | ERROR | StreamingShuffleReader | Connection timeout or IOException during block fetch; producer executor presumed failed; partial reads invalidated and FetchFailedException thrown for DAG recomputation |
 | `Spilling partition (shuffle=<id>, partition=<id>): <bytes> bytes` | INFO | MemorySpillManager | A specific partition's buffer is being persisted to disk during spill; includes partition identification and data volume |
-| `Falling back to sort-based shuffle` | WARN | StreamingShuffleManager | Automatic fallback condition met; this shuffle reverts to sort-based behavior (planned — emitted when StreamingShuffleManager is created) |
+| `Streaming shuffle fallback triggered: <reason>` | ERROR | StreamingShuffleManager | Automatic fallback condition met; subsequent shuffle registrations will use sort-based behavior. Reason indicates the triggering condition (memory pressure, network saturation, or consumer slowdown). |
 | `CRC32C validation failed for block <id>: received <n> bytes but expected <n> bytes` | ERROR | StreamingShuffleReader | CRC32C size-based integrity validation failed; IOException thrown to trigger the FetchFailedException path for retransmission |
 
 ## Step-by-Step Debugging Workflow
@@ -389,11 +393,12 @@ The following limitations apply to the streaming shuffle feature in the current 
    sort-based shuffle. The per-partition buffer size follows the formula:
    `(executorMemory × bufferSizePercent) / numPartitions`.
 
-5. **Automatic Fallback Is Per-Shuffle.**
-   When automatic fallback conditions are triggered, only the specific shuffle experiencing
-   issues reverts to sort-based behavior. Other concurrent shuffles in the same application
-   may continue using the streaming path. This means mixed-mode operation (some shuffles
-   streaming, some sort-based) is possible within a single application run.
+5. **Automatic Fallback Affects Future Shuffles.**
+   When automatic fallback conditions are triggered, all subsequent shuffle registrations
+   use sort-based behavior. Already-registered streaming shuffles continue using the
+   streaming path and are not reverted. This means mixed-mode operation (some shuffles
+   streaming, some sort-based) is possible within a single application run when fallback
+   is activated mid-execution.
 
 6. **Telemetry Overhead.**
    Streaming shuffle telemetry collection (metrics gauges, counters, and optional debug

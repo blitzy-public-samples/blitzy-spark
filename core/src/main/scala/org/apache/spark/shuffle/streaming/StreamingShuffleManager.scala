@@ -166,6 +166,12 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   override val shuffleBlockResolver: StreamingShuffleBlockResolver =
     new StreamingShuffleBlockResolver(conf)
 
+  // Log initialization message for operational visibility.
+  // This message is referenced by the troubleshooting guide's verification
+  // checklist and debugging workflow as the primary indicator that streaming
+  // shuffle has been activated on this executor (or driver).
+  logInfo("StreamingShuffleManager initialized")
+
   /**
    * Lazily-initialized fallback [[ShuffleManager]] (SortShuffleManager) for handling
    * [[BaseShuffleHandle]] instances when streaming shuffle is disabled or falls back.
