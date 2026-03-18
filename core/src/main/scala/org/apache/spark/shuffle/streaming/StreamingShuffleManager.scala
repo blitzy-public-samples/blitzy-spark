@@ -217,18 +217,20 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
       val bufferPercent = StreamingShuffleConfig.getBufferSizePercent(conf)
       val spillThreshold = StreamingShuffleConfig.getSpillThreshold(conf)
       val partitionCount = dependency.partitioner.numPartitions
-      logInfo(s"Registering streaming shuffle $shuffleId with $partitionCount partitions, " +
-        s"buffer=$bufferPercent%, spillThreshold=$spillThreshold%")
+      if (StreamingShuffleConfig.isDebugEnabled(conf)) {
+        logInfo(s"Registering streaming shuffle $shuffleId with $partitionCount partitions, " +
+          s"buffer=$bufferPercent%, spillThreshold=$spillThreshold%")
+      }
       new StreamingShuffleHandle[K, V, C](
         shuffleId, dependency, bufferPercent, spillThreshold, partitionCount)
     } else {
       // Fallback: create BaseShuffleHandle for sort-based path.
       // This branch is taken when streaming is disabled (the default) or when
       // runtime fallback conditions have been detected.
-      if (fallbackActivated.get()) {
+      if (fallbackActivated.get() && StreamingShuffleConfig.isDebugEnabled(conf)) {
         logInfo(s"Registering shuffle $shuffleId with BaseShuffleHandle " +
           "(streaming fallback activated due to runtime degradation)")
-      } else {
+      } else if (!fallbackActivated.get()) {
         logDebug(s"Registering shuffle $shuffleId with BaseShuffleHandle " +
           "(streaming shuffle disabled)")
       }
@@ -418,7 +420,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
 
     // Condition 1: Memory pressure prevents buffer allocation (OOM risk)
     if (memoryPressureDetected.get()) {
-      logWarning("Streaming shuffle fallback triggered: memory pressure prevents " +
+      logError("Streaming shuffle fallback triggered: memory pressure prevents " +
         "buffer allocation. Subsequent shuffle registrations will use sort-based shuffle.")
       fallbackActivated.set(true)
       streamingMetricsSource.foreach(_.incrementBackpressureEvents())
@@ -428,7 +430,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
     // Condition 2: Network saturation exceeds 90% link capacity
     val networkRatio = java.lang.Double.longBitsToDouble(currentNetworkSaturation.get())
     if (networkRatio > StreamingShuffleManager.FALLBACK_NETWORK_SATURATION_THRESHOLD) {
-      logWarning(s"Streaming shuffle fallback triggered: network saturation " +
+      logError(s"Streaming shuffle fallback triggered: network saturation " +
         f"${networkRatio * 100}%.1f%% exceeds " +
         f"${StreamingShuffleManager.FALLBACK_NETWORK_SATURATION_THRESHOLD * 100}%.0f%% " +
         "threshold. Subsequent shuffle registrations will use sort-based shuffle.")
@@ -444,7 +446,7 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
       val elapsedNanos = System.nanoTime() - consumerSlowdownStartNanos
       val elapsedSeconds = elapsedNanos / 1000000000L
       if (elapsedSeconds > StreamingShuffleManager.FALLBACK_CONSUMER_SLOWDOWN_DURATION_S) {
-        logWarning(s"Streaming shuffle fallback triggered: consumer " +
+        logError(s"Streaming shuffle fallback triggered: consumer " +
           f"${slowdownRatio}%.1fx slower than producer for ${elapsedSeconds}s " +
           s"(threshold: ${StreamingShuffleManager.FALLBACK_CONSUMER_SLOWDOWN_THRESHOLD}x " +
           s"for >${StreamingShuffleManager.FALLBACK_CONSUMER_SLOWDOWN_DURATION_S}s). " +
@@ -595,6 +597,18 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
    */
   private[streaming] def reportBackpressureEvent(): Unit = {
     streamingMetricsSource.foreach(_.incrementBackpressureEvents())
+  }
+
+  /**
+   * Records a partial read invalidation event in the metrics source.
+   *
+   * Convenience method for [[StreamingShuffleReader]] to report producer failure
+   * detections without needing a direct reference to the metrics source.
+   * This increments the JMX gauge `shuffle.streaming.partialReadInvalidations`
+   * for external monitoring integration (Prometheus, Grafana).
+   */
+  private[streaming] def reportPartialReadInvalidation(): Unit = {
+    streamingMetricsSource.foreach(_.incrementPartialReadInvalidations())
   }
 }
 

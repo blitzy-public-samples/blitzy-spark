@@ -280,7 +280,7 @@ private[spark] class MemorySpillManager(
     var currentTotal = totalAllocatedBytes.get()
     while (!allocated) {
       if (currentTotal + sizeBytes > totalAvailableBytes) {
-        logWarning(s"Buffer allocation denied: current=$currentTotal, " +
+        logError(s"Buffer allocation denied: current=$currentTotal, " +
           s"requested=$sizeBytes, available=$totalAvailableBytes " +
           s"(shuffle=$shuffleId, partition=$partitionId)")
         return false
@@ -409,7 +409,7 @@ private[spark] class MemorySpillManager(
       }
     } catch {
       case e: Exception =>
-        logWarning("Error in spill condition check", e)
+        logError("Error in spill condition check", e)
     }
   }
 
@@ -462,7 +462,7 @@ private[spark] class MemorySpillManager(
                 callback(shuffleId, partitionId, spillFile)
               } catch {
                 case e: Exception =>
-                  logWarning(s"Spill data callback failed for (shuffle=$shuffleId, " +
+                  logError(s"Spill data callback failed for (shuffle=$shuffleId, " +
                     s"partition=$partitionId): ${e.getMessage}", e)
                   // Clean up the empty spill file on callback failure
                   if (spillFile.exists()) {
@@ -471,7 +471,7 @@ private[spark] class MemorySpillManager(
                   false
               }
             case None =>
-              logWarning(s"No spill data callback registered -- cannot persist buffer " +
+              logError(s"No spill data callback registered -- cannot persist buffer " +
                 s"data to disk (shuffle=$shuffleId, partition=$partitionId). " +
                 s"Register a callback via registerSpillCallback() before starting " +
                 s"the spill manager.")
@@ -485,7 +485,7 @@ private[spark] class MemorySpillManager(
           if (!dataWritten) {
             // Data write failed or no callback -- abort spill without reclaiming memory.
             // The partition stays in memory to preserve data integrity.
-            logWarning(s"Spill aborted for (shuffle=$shuffleId, partition=$partitionId): " +
+            logError(s"Spill aborted for (shuffle=$shuffleId, partition=$partitionId): " +
               s"data was not written to disk, keeping partition in memory")
             return
           }
@@ -522,7 +522,7 @@ private[spark] class MemorySpillManager(
           }
         } catch {
           case e: Exception =>
-            logWarning(s"Failed to spill partition (shuffle=$shuffleId, " +
+            logError(s"Failed to spill partition (shuffle=$shuffleId, " +
               s"partition=$partitionId)", e)
         }
 

@@ -271,10 +271,18 @@ private[spark] class StreamingShuffleReader[K, C](
           // Producer failure detected -- invalidate all partial reads from this
           // producer. This atomic invalidation ensures zero corrupt data is used,
           // maintaining the zero data loss guarantee.
-          logWarning(s"Streaming shuffle producer failure detected for block $blockId " +
+          logError(s"Streaming shuffle producer failure detected for block $blockId " +
             s"from ${address.host}:${address.port}: ${e.getMessage}")
 
+          // Update both the accumulator pipeline (for Spark UI metrics) and the
+          // JMX gauge (for external monitoring: Prometheus, Grafana) to ensure
+          // partial read invalidation counts are visible in all monitoring systems.
           readMetrics.incPartialReadInvalidations(1)
+          SparkEnv.get.shuffleManager match {
+            case mgr: StreamingShuffleManager =>
+              mgr.reportPartialReadInvalidation()
+            case _ => // Non-streaming manager; JMX gauge update not applicable
+          }
 
           // Extract mapId and reduceId from ShuffleBlockId for FetchFailedException.
           // mapId is the unique task attempt ID used by DAGScheduler to invalidate

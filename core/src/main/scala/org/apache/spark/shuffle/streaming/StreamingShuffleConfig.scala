@@ -91,18 +91,40 @@ private[spark] object StreamingShuffleConfig extends Logging {
    * Get buffer size percentage via the [[SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT]]
    * ConfigEntry. Range validation [1, 50] is enforced by the ConfigBuilder's
    * checkValue constraint defined in config/package.scala.
+   *
+   * If the configured value is outside the valid range [1, 50], logs a warning
+   * and falls back to the default value (20) for resilient operation rather
+   * than crashing the executor at startup.
    */
   def getBufferSizePercent(conf: SparkConf): Int = {
-    conf.get(SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT)
+    try {
+      conf.get(SHUFFLE_STREAMING_BUFFER_SIZE_PERCENT)
+    } catch {
+      case e: IllegalArgumentException =>
+        logWarning(s"Invalid value for $BUFFER_SIZE_PERCENT_KEY: ${e.getMessage}. " +
+          s"Falling back to default value $BUFFER_SIZE_PERCENT_DEFAULT.")
+        BUFFER_SIZE_PERCENT_DEFAULT
+    }
   }
 
   /**
    * Get spill threshold percentage via the [[SHUFFLE_STREAMING_SPILL_THRESHOLD]]
    * ConfigEntry. Range validation [50, 95] is enforced by the ConfigBuilder's
    * checkValue constraint defined in config/package.scala.
+   *
+   * If the configured value is outside the valid range [50, 95], logs a warning
+   * and falls back to the default value (80) for resilient operation rather
+   * than crashing the executor at startup.
    */
   def getSpillThreshold(conf: SparkConf): Int = {
-    conf.get(SHUFFLE_STREAMING_SPILL_THRESHOLD)
+    try {
+      conf.get(SHUFFLE_STREAMING_SPILL_THRESHOLD)
+    } catch {
+      case e: IllegalArgumentException =>
+        logWarning(s"Invalid value for $SPILL_THRESHOLD_KEY: ${e.getMessage}. " +
+          s"Falling back to default value $SPILL_THRESHOLD_DEFAULT.")
+        SPILL_THRESHOLD_DEFAULT
+    }
   }
 
   /**
