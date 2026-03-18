@@ -67,6 +67,10 @@ private[spark] object InternalAccumulator {
     val REMOTE_MERGED_BYTES_READ = SHUFFLE_PUSH_READ_METRICS_PREFIX + "remoteMergedBytesRead"
     val LOCAL_MERGED_BYTES_READ = SHUFFLE_PUSH_READ_METRICS_PREFIX + "localMergedBytesRead"
     val REMOTE_MERGED_REQS_DURATION = SHUFFLE_PUSH_READ_METRICS_PREFIX + "remoteMergedReqsDuration"
+    // Streaming shuffle read metrics
+    val PARTIAL_READ_INVALIDATIONS = SHUFFLE_READ_METRICS_PREFIX + "partialReadInvalidations"
+    val STREAMING_BLOCKS_RECEIVED = SHUFFLE_READ_METRICS_PREFIX + "streamingBlocksReceived"
+    val CHECKSUM_FAILURES = SHUFFLE_READ_METRICS_PREFIX + "checksumFailures"
   }
 
   // Names of shuffle write metrics
@@ -74,6 +78,10 @@ private[spark] object InternalAccumulator {
     val BYTES_WRITTEN = SHUFFLE_WRITE_METRICS_PREFIX + "bytesWritten"
     val RECORDS_WRITTEN = SHUFFLE_WRITE_METRICS_PREFIX + "recordsWritten"
     val WRITE_TIME = SHUFFLE_WRITE_METRICS_PREFIX + "writeTime"
+    // Streaming shuffle write metrics
+    val STREAMING_BUFFER_BYTES = SHUFFLE_WRITE_METRICS_PREFIX + "streamingBufferBytes"
+    val STREAMING_SPILL_COUNT = SHUFFLE_WRITE_METRICS_PREFIX + "streamingSpillCount"
+    val BACKPRESSURE_EVENTS = SHUFFLE_WRITE_METRICS_PREFIX + "backpressureEvents"
   }
 
   // Names of output metrics
