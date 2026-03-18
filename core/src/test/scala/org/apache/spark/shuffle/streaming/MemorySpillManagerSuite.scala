@@ -24,6 +24,8 @@ import org.mockito.{Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
 import org.mockito.Mockito.when
 import org.mockito.invocation.InvocationOnMock
+import org.scalatest.concurrent.Eventually._
+import org.scalatest.time.{Millis, Seconds, Span}
 
 import org.apache.spark.{SparkConf, SparkFunSuite}
 import org.apache.spark.storage.{BlockManager, DiskBlockManager, TempLocalBlockId}
@@ -117,11 +119,12 @@ class MemorySpillManagerSuite extends SparkFunSuite {
     // Allocating 180000 should trigger spill
     assert(spillManager.allocateBuffer(0, 0, 180000L))
 
-    // Give time for polling loop (100ms interval)
-    Thread.sleep(200)
-
-    // Spill should have been triggered
-    assert(spillManager.getSpillCount >= 1L)
+    // Wait for the async polling loop (100ms interval) to detect the threshold
+    // breach and trigger spill. Uses eventually{} instead of Thread.sleep for
+    // CI-resilient timing that avoids flaky failures under load.
+    eventually(timeout(Span(5, Seconds)), interval(Span(50, Millis))) {
+      assert(spillManager.getSpillCount >= 1L)
+    }
 
     spillManager.stop()
   }
@@ -143,12 +146,12 @@ class MemorySpillManagerSuite extends SparkFunSuite {
     assert(spillManager.allocateBuffer(0, 1, 150000L))  // Large partition
     assert(spillManager.allocateBuffer(0, 2, 60000L))   // Medium partition
 
-    // Total = 260000 > threshold 250000 — spill should trigger
-    Thread.sleep(200)
-
-    // After spill, the largest partition (partition 1) should have been evicted
-    assert(spillManager.getSpillCount >= 1L)
-    assert(spillManager.getSpillBytes >= 150000L)
+    // Total = 260000 > threshold 250000 — spill should trigger via polling loop.
+    // Uses eventually{} for CI-resilient timing.
+    eventually(timeout(Span(5, Seconds)), interval(Span(50, Millis))) {
+      assert(spillManager.getSpillCount >= 1L)
+      assert(spillManager.getSpillBytes >= 150000L)
+    }
 
     spillManager.stop()
   }
@@ -225,12 +228,14 @@ class MemorySpillManagerSuite extends SparkFunSuite {
 
     // Allocate past threshold to trigger spill
     spillManager.allocateBuffer(0, 0, 300000L)
-    Thread.sleep(200) // Wait for polling loop
 
-    // Verify metrics were updated
-    assert(spillManager.getSpillCount >= 1L)
-    assert(spillManager.getSpillBytes > 0L)
-    assert(spillManager.getSpillLatencyNs > 0L)
+    // Wait for async polling loop to trigger spill. Uses eventually{} for
+    // CI-resilient timing.
+    eventually(timeout(Span(5, Seconds)), interval(Span(50, Millis))) {
+      assert(spillManager.getSpillCount >= 1L)
+      assert(spillManager.getSpillBytes > 0L)
+      assert(spillManager.getSpillLatencyNs > 0L)
+    }
 
     spillManager.stop()
   }
@@ -305,10 +310,12 @@ class MemorySpillManagerSuite extends SparkFunSuite {
     // Allocate past threshold
     spillManager.allocateBuffer(0, 0, 300000L)
 
-    // Spill should trigger within ~200ms (2 polling intervals)
-    Thread.sleep(250)
-    assert(spillManager.getSpillCount >= 1L,
-      "Spill should have triggered within 200ms of exceeding threshold")
+    // Spill should trigger within polling intervals. Uses eventually{} for
+    // CI-resilient timing instead of fixed Thread.sleep.
+    eventually(timeout(Span(5, Seconds)), interval(Span(50, Millis))) {
+      assert(spillManager.getSpillCount >= 1L,
+        "Spill should have triggered within polling intervals of exceeding threshold")
+    }
 
     spillManager.stop()
   }

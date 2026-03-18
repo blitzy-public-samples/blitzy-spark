@@ -19,6 +19,7 @@ package org.apache.spark.shuffle.streaming
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import java.util.function.{Function => JFunction}
 import java.util.zip.CRC32C
 
@@ -38,9 +39,17 @@ import org.apache.spark.storage.ShuffleBlockId
  *
  * Instead of writing shuffle data to local disk files (as [[org.apache.spark.shuffle.sort
  * .SortShuffleWriter SortShuffleWriter]] does), this writer buffers serialized records
- * in per-partition memory regions and pipelines them to consumer executors through the
- * existing Netty-based transport layer. This eliminates shuffle materialization latency
- * for shuffle-heavy workloads.
+ * in per-partition memory regions, eliminating disk materialization latency for
+ * shuffle-heavy workloads.
+ *
+ * ==V1 Architecture Note==
+ * The v1 implementation uses an '''in-memory store-and-fetch''' model: data is buffered
+ * in memory during writes and stored in the [[StreamingShuffleBlockResolver]] at write
+ * completion. The [[StreamingShuffleReader]] fetches blocks after
+ * [[org.apache.spark.scheduler.MapStatus MapStatus]] publication. This avoids the disk
+ * I/O overhead of sort-based shuffle while deferring real-time producer-to-consumer
+ * streaming via TransportClient to a future version. See `streamBlockToConsumer()` and
+ * `streaming-shuffle-guide.md` for architectural details.
  *
  * ==Memory Management==
  * Per-partition memory buffers are capped at a configurable percentage of executor memory
@@ -77,7 +86,11 @@ import org.apache.spark.storage.ShuffleBlockId
  * ==Thread Safety==
  * Partition buffers use [[ConcurrentHashMap]] with per-partition synchronized access for
  * safe concurrent use across executor threads. Buffer size tracking and checksum updates
- * are performed under the same per-partition lock to maintain consistency.
+ * are performed under the same per-partition lock to maintain consistency. Aggregate
+ * buffer tracking (`totalBufferedBytes`) uses [[java.util.concurrent.atomic.AtomicLong]]
+ * for thread-safe updates without requiring global synchronization. The idempotent
+ * `stopping` flag uses [[java.util.concurrent.atomic.AtomicBoolean]] with
+ * `compareAndSet` for safe concurrent access from task and cleanup threads.
  *
  * @param handle       Streaming-specific shuffle handle containing the [[ShuffleDependency]]
  *                     with partitioner, serializer, and aggregator configuration
@@ -214,16 +227,26 @@ private[spark] class StreamingShuffleWriter[K, V](
   /**
    * Total bytes currently buffered in memory across all partitions.
    * Used for aggregate buffer utilization monitoring and spill condition checking.
+   *
+   * Thread-safe via [[AtomicLong]] to prevent race conditions when multiple
+   * tasks on the same executor concurrently write to different partitions,
+   * as increments in write() and decrements in flushPartitionBuffer() may
+   * execute on different threads.
    */
-  private var totalBufferedBytes: Long = 0L
+  private val totalBufferedBytes = new AtomicLong(0L)
 
   /**
    * Idempotent stop flag preventing double cleanup. Map tasks may call
    * stop(success = true) followed by stop(success = false) if an exception
    * occurs, so we must ensure cleanup happens exactly once.
-   * Follows the same pattern as SortShuffleWriter (line 46-47).
+   *
+   * Thread-safe via [[AtomicBoolean]] with [[AtomicBoolean.compareAndSet]]
+   * for idempotent check-and-set semantics, ensuring that stop() is safe
+   * when called from multiple threads (e.g., task thread and executor cleanup
+   * thread). Follows the same idempotent stop pattern as SortShuffleWriter
+   * but with atomic thread-safety guarantees.
    */
-  private var stopping = false
+  private val stopping = new AtomicBoolean(false)
 
   /** MapStatus produced by write(), consumed by stop(success = true). */
   private var mapStatus: MapStatus = null
@@ -278,7 +301,7 @@ private[spark] class StreamingShuffleWriter[K, V](
           partitionLengths(partitionId) += recordLength
           currentBufferSizes(partitionId) += recordLength
         }
-        totalBufferedBytes += recordLength
+        totalBufferedBytes.addAndGet(recordLength)
 
         // Update the running CRC32C checksum for this partition
         val checksum = getOrCreatePartitionChecksum(partitionId)
@@ -354,10 +377,9 @@ private[spark] class StreamingShuffleWriter[K, V](
    */
   override def stop(success: Boolean): Option[MapStatus] = {
     try {
-      if (stopping) {
+      if (!stopping.compareAndSet(false, true)) {
         return None
       }
-      stopping = true
       if (success) {
         Option(mapStatus)
       } else {
@@ -460,11 +482,10 @@ private[spark] class StreamingShuffleWriter[K, V](
   }
 
   /**
-   * Flushes a partition's buffer when it exceeds the 2MB block size threshold.
+   * Flushes a partition's buffer when it exceeds the 2MB block size threshold
+   * or when the partition is selected for eviction by the largest-first eviction
+   * policy in [[checkSpillCondition]].
    *
-   * Consolidates the current accumulated serialized records into a single streaming
-   * block, generates a CRC32C checksum, and streams it to consumer executors. Resets
-   * the [[currentBufferSizes]] counter to allow further buffering, but the partition's
    * Consolidates the accumulated serialized records into a single streaming block,
    * generates a CRC32C checksum for the block, and prepares it for pipelining to
    * consumer executors via the transport layer. After flushing, the partition's
@@ -503,7 +524,7 @@ private[spark] class StreamingShuffleWriter[K, V](
       buffer.clear()
       val flushedBytes = currentBufferSizes(partitionId)
       currentBufferSizes(partitionId) = 0L
-      totalBufferedBytes -= flushedBytes
+      totalBufferedBytes.addAndGet(-flushedBytes)
       consolidated
     }
 
@@ -517,20 +538,36 @@ private[spark] class StreamingShuffleWriter[K, V](
   // =========================================================================
 
   /**
-   * Streams a consolidated partition block to consumer executors via the Netty
-   * transport layer.
+   * Prepares a consolidated partition block for consumer access with CRC32C
+   * integrity checksum generation.
    *
-   * Generates a CRC32C integrity checksum for the block before transmission.
-   * The block data and checksum are paired for validation on the consumer side
-   * by [[StreamingShuffleReader]].
+   * ==V1 Architecture Simplification==
+   * In the v1 implementation, this method performs CRC32C checksum generation
+   * and telemetry logging but does NOT perform real-time network streaming of
+   * data to consumer executors during the write phase. Instead, the v1 data
+   * flow follows an '''in-memory store-and-fetch''' model:
    *
-   * Leverages the existing TransportClient infrastructure from the
-   * `common/network-common` module. The actual network transfer is routed
-   * through the executor's block transfer service following the pattern
-   * established by [[org.apache.spark.network.netty.NettyBlockTransferService]].
+   *  1. The writer buffers serialized records in per-partition memory regions
+   *     (avoiding disk I/O, unlike the sort-based shuffle).
+   *  2. At write completion, all partition data is stored in the
+   *     [[StreamingShuffleBlockResolver]]'s in-memory cache via
+   *     [[storePartitionDataInResolver]].
+   *  3. The [[StreamingShuffleReader]] fetches blocks from the resolver after
+   *     the writer publishes its [[org.apache.spark.scheduler.MapStatus MapStatus]]
+   *     to the [[org.apache.spark.MapOutputTracker MapOutputTracker]].
    *
-   * Block size is capped at 2MB for optimal network pipelining efficiency,
-   * matching the TCP window scaling behavior of modern network stacks.
+   * This approach eliminates disk materialization latency (the primary
+   * performance bottleneck in sort-based shuffle) while avoiding the
+   * complexity of producer-consumer coordination before MapStatus publication.
+   * The latency reduction comes from keeping all shuffle data in memory buffers
+   * rather than writing to and reading from local disk files.
+   *
+   * '''Future enhancement''': A subsequent version will implement real-time
+   * streaming via `TransportClient.sendRpc()` or stream upload, enabling
+   * reduce tasks to begin processing data before the map task completes.
+   * This requires producer-consumer coordination before MapStatus is available,
+   * including block-level metadata exchange and incremental acknowledgment
+   * processing. See `streaming-shuffle-guide.md` Architecture section for details.
    *
    * @param partitionId The partition ID of the data block
    * @param blockData The consolidated serialized record data for this block
@@ -539,16 +576,19 @@ private[spark] class StreamingShuffleWriter[K, V](
     val blockChecksum = generateBlockChecksum(blockData)
     val blockSizeBytes = blockData.length
 
-    // Log block streaming event for operational visibility.
+    // Log block preparation event for operational visibility.
     // Debug logging is controlled by spark.shuffle.streaming.debug configuration.
-    logDebug(s"Streaming block: shuffle=$shuffleId, map=$mapId, " +
+    logDebug(s"Prepared block: shuffle=$shuffleId, map=$mapId, " +
       s"partition=$partitionId, size=$blockSizeBytes bytes, checksum=$blockChecksum")
 
-    // The block data is streamed to consumer executors via the Netty transport
-    // layer in the full distributed pipeline. Data is NOT stored in the block
-    // resolver here -- all partition data is stored in a single consolidated
-    // putBlockData call via storePartitionDataInResolver() at write() completion,
-    // ensuring the block resolver has the complete partition data for the reader.
+    // V1 architecture: Block data is NOT streamed to consumers here. All
+    // partition data is consolidated and stored in the block resolver via
+    // storePartitionDataInResolver() at write() completion. The reader
+    // fetches blocks from the resolver after MapStatus publication.
+    // This in-memory store-and-fetch model avoids disk I/O while deferring
+    // the complexity of real-time producer-to-consumer streaming to a future
+    // version. See the class-level Scaladoc and streaming-shuffle-guide.md
+    // for the architectural rationale.
   }
 
   /**
@@ -696,8 +736,9 @@ private[spark] class StreamingShuffleWriter[K, V](
     // Monitor aggregate buffer utilization as a proxy for consumer lag.
     // When buffered data exceeds 90% of the total budget, it indicates
     // consumers are not draining data fast enough.
+    val currentBuffered = totalBufferedBytes.get()
     val utilizationPercent = if (totalBufferBudgetBytes > 0) {
-      (totalBufferedBytes * 100L) / totalBufferBudgetBytes
+      (currentBuffered * 100L) / totalBufferBudgetBytes
     } else {
       0L
     }
@@ -722,7 +763,7 @@ private[spark] class StreamingShuffleWriter[K, V](
    *
    * Spill trigger responds within <100ms per specification by:
    * 1. Checking total buffered bytes against the threshold budget
-   * 2. Identifying the largest buffered partition for LRU eviction
+   * 2. Identifying the largest buffered partition for largest-first eviction
    * 3. Flushing that partition's buffer to free memory immediately
    *
    * The actual disk persistence is handled by [[MemorySpillManager]] which
@@ -739,13 +780,14 @@ private[spark] class StreamingShuffleWriter[K, V](
   private def checkSpillCondition(): Unit = {
     val spillThresholdPercent = handle.spillThreshold
     val thresholdBytes = (totalBufferBudgetBytes * spillThresholdPercent) / 100L
+    val currentBuffered = totalBufferedBytes.get()
 
-    if (totalBufferedBytes >= thresholdBytes && totalBufferedBytes > 0) {
+    if (currentBuffered >= thresholdBytes && currentBuffered > 0) {
       logInfo(s"Spill condition triggered: shuffle=$shuffleId, map=$mapId, " +
-        s"buffered=$totalBufferedBytes bytes, threshold=$thresholdBytes bytes " +
+        s"buffered=$currentBuffered bytes, threshold=$thresholdBytes bytes " +
         s"($spillThresholdPercent% of $totalBufferBudgetBytes)")
 
-      // Find the largest buffered partition for eviction (LRU policy)
+      // Find the largest buffered partition for eviction (largest-first policy)
       val largestPartition = findLargestBufferedPartition()
       if (largestPartition >= 0) {
         // Flush the largest partition's buffer to reclaim memory.
@@ -761,9 +803,10 @@ private[spark] class StreamingShuffleWriter[K, V](
   /**
    * Finds the partition with the largest current in-memory buffer size.
    *
-   * This implements the LRU eviction selection policy where the largest
-   * buffered partition is selected for spill, following the principle that
-   * evicting the largest buffer provides the most immediate memory relief.
+   * This implements the '''largest-first''' partition eviction policy where the
+   * partition with the highest [[currentBufferSizes]] value is selected for spill.
+   * Evicting the largest buffer provides the most immediate memory relief per
+   * spill operation, maximizing the amount of reclaimed memory in a single flush.
    *
    * @return The partition ID with the largest buffer, or -1 if no buffers exist
    */
@@ -810,7 +853,7 @@ private[spark] class StreamingShuffleWriter[K, V](
     partitionBuffers.clear()
     partitionChecksums.clear()
     // Reset aggregate counters
-    totalBufferedBytes = 0L
+    totalBufferedBytes.set(0L)
     blocksStreamed = 0L
 
     logDebug(s"StreamingShuffleWriter resources cleaned up for " +

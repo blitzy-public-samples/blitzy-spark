@@ -563,4 +563,169 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with LocalSparkContext {
     assert(handle.spillThreshold === 85)
     assert(handle.expectedPartitionCount === 50)
   }
+
+  // ===========================================================================
+  // Data-Driven Pipeline Tests
+  //
+  // The following tests exercise the full reader pipeline with REAL data flowing
+  // through: writer serialization → block resolver storage → reader fetch →
+  // CRC32C validation → deserialization → aggregation → sorting. They complement
+  // Tests 1-13 which primarily validate error paths and empty-input handling.
+  //
+  // These tests use local SparkContext with spark.shuffle.manager=streaming to
+  // ensure the streaming writer stores data and the streaming reader reads it
+  // via the local BlockManager's getLocalBlockData() path (Tier 1 in
+  // fetchBlockWithTimeout), which exercises the full six-stage read pipeline:
+  //   1. fetchStreamingBlocks (local block fetch + CRC32C checksum computation)
+  //   2. Deserialization via serializerManager.wrapStream + asKeyValueIterator
+  //   3. Per-record metrics tracking
+  //   4. InterruptibleIterator wrapping for cancellation support
+  //   5. Aggregation and/or sorting via applyAggregationAndSorting
+  //   6. Result InterruptibleIterator wrapping
+  // ===========================================================================
+
+  // ---------------------------------------------------------------------------
+  // Test 14: Full pipeline with real deserialized records
+  // ---------------------------------------------------------------------------
+
+  test("read pipeline correctly deserializes real records via local streaming shuffle") {
+    val testConf = new SparkConf(false)
+      .set("spark.shuffle.manager", "streaming")
+      .set("spark.shuffle.streaming.enabled", "true")
+    sc = new SparkContext("local[2]", "streaming-reader-data-test", testConf)
+
+    // Create an RDD with known data that requires a shuffle (groupByKey).
+    // groupByKey triggers the full streaming shuffle pipeline:
+    //   writer.write() → storePartitionDataInResolver() → block resolver store
+    //     → reader.read() → fetchStreamingBlocks (local fetch) → validateChecksum
+    //     → deserialize → groupByKey aggregation
+    val inputData = (1 to 100).map(i => (i % 10, i))
+    val rdd = sc.parallelize(inputData, 4)
+
+    // groupByKey triggers shuffle: writer serializes → resolver stores →
+    // reader deserializes via the full six-stage pipeline
+    val result = rdd.groupByKey(2).collect().toMap
+
+    // Verify all 10 distinct keys are present (0-9)
+    assert(result.size === 10,
+      s"Should have 10 distinct keys (0-9), got ${result.size}: ${result.keys.toSeq.sorted}")
+
+    // Verify all values present and correctly grouped under each key
+    for (key <- 0 until 10) {
+      val expected = inputData.filter(_._1 == key).map(_._2).sorted
+      val actual = result(key).toSeq.sorted
+      assert(actual === expected,
+        s"Values for key $key should match: expected $expected, got $actual")
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 15: Aggregation produces correct combined values via streaming shuffle
+  // ---------------------------------------------------------------------------
+
+  test("aggregation produces correct combined values with real streaming shuffle data") {
+    val testConf = new SparkConf(false)
+      .set("spark.shuffle.manager", "streaming")
+      .set("spark.shuffle.streaming.enabled", "true")
+    sc = new SparkContext("local[2]", "streaming-reader-aggregation-test", testConf)
+
+    // reduceByKey exercises the full streaming pipeline including the reader's
+    // applyAggregationAndSorting() path with real aggregator functions:
+    //   writer → resolver → reader → aggregator.combineValuesByKey via
+    //   ExternalAppendOnlyMap → combined values
+    val inputData = (1 to 200).map(i => (i % 5, i))
+    val result = sc.parallelize(inputData, 4).reduceByKey(_ + _, 2).collect().toMap
+
+    // Verify aggregated sums match expected values for each key
+    for (key <- 0 until 5) {
+      val expectedSum = inputData.filter(_._1 == key).map(_._2).sum
+      assert(result(key) === expectedSum,
+        s"Aggregated sum for key $key: expected $expectedSum, got ${result(key)}")
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 16: Sorting produces correctly ordered output via streaming shuffle
+  // ---------------------------------------------------------------------------
+
+  test("sorting produces correct key order with real streaming shuffle data") {
+    val testConf = new SparkConf(false)
+      .set("spark.shuffle.manager", "streaming")
+      .set("spark.shuffle.streaming.enabled", "true")
+    sc = new SparkContext("local[2]", "streaming-reader-sorting-test", testConf)
+
+    // sortByKey exercises the reader's applyAggregationAndSorting() path with
+    // key ordering (ExternalSorter with Ordering[Int]). The pipeline is:
+    //   writer → resolver → reader → ExternalSorter(keyOrdering) → sorted output
+    //
+    // Use a deterministic seed for reproducibility.
+    val random = new scala.util.Random(42)
+    val inputData = random.shuffle((1 to 100).toList).map(i => (i, s"val-$i"))
+    val result = sc.parallelize(inputData, 4).sortByKey(ascending = true, 2).collect()
+
+    // Verify output is sorted in ascending key order
+    val keys = result.map(_._1).toSeq
+    assert(keys === keys.sorted,
+      s"Output should be sorted in ascending key order. First 10: ${keys.take(10)}")
+    assert(keys.size === 100,
+      s"Should have all 100 records, got ${keys.size}")
+
+    // Verify values are correctly paired with their keys
+    result.foreach { case (k, v) =>
+      assert(v === s"val-$k",
+        s"Value for key $k should be val-$k, got $v")
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 17: CRC32C checksum computation detects corruption
+  // ---------------------------------------------------------------------------
+
+  test("CRC32C checksum detects single-byte corruption in block data") {
+    // Validates the CRC32C mechanism used by the streaming shuffle pipeline:
+    //   - Writer (StreamingShuffleWriter.computeBlockChecksum) generates checksums
+    //   - Reader (StreamingShuffleReader.validateChecksum) validates checksums
+    //
+    // This test verifies that a single byte flip in block data produces a
+    // different CRC32C checksum, proving the integrity detection mechanism is
+    // sound. While the current v1 reader validates via size comparison (the
+    // producer-to-consumer checksum exchange is a v2 enhancement), the CRC32C
+    // computation itself must be correct for the full integrity protocol.
+    val data = "Streaming shuffle block data for CRC32C validation test".getBytes("UTF-8")
+
+    val crc = new java.util.zip.CRC32C()
+    crc.update(data)
+    val originalChecksum = crc.getValue
+
+    // Verify deterministic: same data produces same checksum on re-computation
+    val crcRepeat = new java.util.zip.CRC32C()
+    crcRepeat.update(data)
+    assert(crcRepeat.getValue === originalChecksum,
+      "CRC32C should be deterministic for identical input data")
+
+    // Corrupt a single byte in the middle of the data
+    val corruptedData = data.clone()
+    corruptedData(data.length / 2) = (corruptedData(data.length / 2) ^ 0xFF).toByte
+
+    val crcCorrupted = new java.util.zip.CRC32C()
+    crcCorrupted.update(corruptedData)
+    val corruptedChecksum = crcCorrupted.getValue
+
+    // Corrupted data MUST produce a different checksum — this is the integrity
+    // detection guarantee that the reader relies on
+    assert(corruptedChecksum !== originalChecksum,
+      s"CRC32C should detect single-byte corruption: " +
+        s"original=0x${originalChecksum.toHexString}, " +
+        s"corrupted=0x${corruptedChecksum.toHexString}")
+
+    // Also verify multi-byte corruption is detected
+    val multiCorruptData = data.clone()
+    multiCorruptData(0) = (multiCorruptData(0) ^ 0x01).toByte
+    multiCorruptData(data.length - 1) = (multiCorruptData(data.length - 1) ^ 0x01).toByte
+
+    val crcMulti = new java.util.zip.CRC32C()
+    crcMulti.update(multiCorruptData)
+    assert(crcMulti.getValue !== originalChecksum,
+      "CRC32C should detect multi-byte corruption at data boundaries")
+  }
 }

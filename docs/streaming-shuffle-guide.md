@@ -123,9 +123,9 @@ properties use the `spark.shuffle.streaming.*` namespace.
     <td>Int</td>
     <td>[50, 95]</td>
     <td>
-      Buffer occupancy percentage threshold that triggers automatic disk spill via LRU partition
-      eviction. When aggregate buffer utilization across all active streaming shuffles on an
-      executor exceeds this threshold, the largest buffered partition is spilled to disk.
+      Buffer occupancy percentage threshold that triggers automatic disk spill via largest-first
+      partition eviction. When aggregate buffer utilization across all active streaming shuffles on
+      an executor exceeds this threshold, the largest buffered partition is spilled to disk.
     </td>
   </tr>
   <tr>
@@ -165,10 +165,28 @@ properties use the `spark.shuffle.streaming.*` namespace.
 
 # Architecture
 
-## Producer-to-Consumer Data Pipeline
+## v1 Architecture: In-Memory Store-and-Fetch Pipeline
 
-The streaming shuffle replaces the traditional write-to-disk-then-read model with a buffered
-streaming pipeline. The data flow proceeds as follows:
+<div class="note">
+<strong>v1 Implementation Note:</strong> The initial version (v1) of the streaming shuffle uses an
+<strong>in-memory store-and-fetch</strong> architecture rather than a real-time producer-to-consumer
+streaming pipeline. In v1, the <code>StreamingShuffleWriter</code> buffers all partition data in
+memory (with automatic disk spill when memory pressure is detected) and stores the final
+serialized output via the <code>StreamingShuffleBlockResolver</code> at the end of the map task.
+The <code>StreamingShuffleReader</code> then fetches completed blocks from the resolver after the
+map task reports its <code>MapStatus</code>. This design was a deliberate simplification for the
+initial release to establish a correct, well-tested foundation. It provides latency benefits over
+the sort-based shuffle by avoiding mandatory disk materialization — data that fits in memory is
+served directly from memory buffers without disk I/O. A future version will introduce true
+real-time streaming where data is pipelined to consumers during the map phase, before the writer
+completes. The backpressure protocol, memory spill management, and block integrity infrastructure
+are already in place to support that evolution.
+</div>
+
+## Data Flow
+
+The streaming shuffle replaces the traditional write-to-disk-then-read model with a memory-first
+buffered pipeline. The data flow in v1 proceeds as follows:
 
 1. **Map Task (Producer)**: The `StreamingShuffleWriter` partitions incoming records by key and
    buffers them in per-partition memory regions. Each partition buffer is sized at
@@ -178,22 +196,30 @@ streaming pipeline. The data flow proceeds as follows:
    via the existing `MemoryManager` interface. Memory usage is continuously monitored by the
    `MemorySpillManager`.
 
-3. **Network Streaming**: Once a buffer reaches the 2 MB block size threshold, the buffered data is
-   pipelined directly to the consumer executor via the existing Netty-based transport layer
-   (`TransportClient` / `TransportServer`). This eliminates the need to write all shuffle data to
-   disk before the reduce phase can start.
+3. **Block Storage**: At the end of the map task, the writer serializes all buffered partition data
+   and stores it via the `StreamingShuffleBlockResolver`. Partitions that were spilled to disk
+   during the write phase are served from their spill files. This in-memory storage approach
+   avoids the mandatory disk materialization of the sort-based shuffle — data that fits in memory
+   is served directly without disk I/O.
 
-4. **Reduce Task (Consumer)**: The `StreamingShuffleReader` polls producers for available data
-   blocks before the shuffle is fully complete (in-progress block requests). This allows the reduce
-   task to begin processing data as soon as it becomes available.
+4. **Reduce Task (Consumer)**: The `StreamingShuffleReader` queries `MapOutputTracker` for shuffle
+   block locations and fetches blocks from the `StreamingShuffleBlockResolver` on the producer
+   executor. A 2-tier fetch strategy tries local block access first (for co-located tasks), then
+   remote fetch via the `BlockManager` network transport layer.
 
-5. **Acknowledgment**: The consumer sends acknowledgment positions (byte offsets) back to the
-   producer after successfully receiving and validating each block. The producer uses these
-   acknowledgments to reclaim buffer memory.
+5. **Data Integrity**: A CRC32C checksum fingerprint is generated for each partition block on the
+   producer side for integrity validation. The consumer validates the block size and checksum
+   upon receipt and detects corruption through size deviation analysis.
 
-6. **Data Integrity**: A CRC32C checksum is generated for each 2 MB block on the producer side.
-   The consumer validates the checksum upon receipt and requests retransmission if a mismatch is
-   detected.
+### Future: Real-Time Streaming Pipeline (Planned)
+
+In a future version, the data flow will be enhanced so that the `StreamingShuffleWriter` pipelines
+buffered data directly to consumer executors via the existing Netty-based transport layer
+(`TransportClient` / `TransportServer`) as soon as a buffer reaches the 2 MB block size threshold.
+This will allow reduce tasks to begin processing data before the map task is fully complete
+(in-progress block requests). The acknowledgment protocol is already designed to support this:
+the consumer will send acknowledgment positions (byte offsets) back to the producer for buffer
+reclamation.
 
 ## Backpressure Protocol
 
@@ -230,7 +256,7 @@ disk when memory pressure builds:
 - **Spill Trigger**: When aggregate buffer occupancy exceeds the configured spill threshold (default
   80%), a spill operation is initiated.
 
-- **Eviction Policy**: LRU (Least Recently Used) eviction selects the largest buffered partition for
+- **Eviction Policy**: Largest-first eviction selects the partition with the most buffered data for
   disk spill. This prioritizes reclaiming the most memory in a single eviction.
 
 - **Disk Persistence**: Spilled partition data is persisted via the existing `BlockManager` disk
@@ -438,7 +464,7 @@ fallback to the sort-based shuffle.
 When memory pressure threatens executor stability:
 
 1. The `MemorySpillManager` detects buffer utilization exceeding the configured spill threshold.
-2. LRU eviction selects the largest buffered partition for disk spill.
+2. Largest-first eviction selects the partition with the most buffered data for disk spill.
 3. If spilling cannot free sufficient memory (e.g., all partitions are already spilled), the
    streaming shuffle signals a fallback condition to the `StreamingShuffleManager`.
 4. The `StreamingShuffleManager` routes subsequent shuffle registrations to sort-based shuffle
