@@ -17,6 +17,8 @@ limitations under the License.
 
 # Product Requirements Document — Apache Spark
 
+## 1. Document Header
+
 | Field | Value |
 |-------|-------|
 | **Product Version** | 4.1.0-SNAPSHOT |
@@ -885,7 +887,7 @@ sequenceDiagram
 | Scala | 2.13.17 | Required | `docs/_config.yml` line 25 |
 | Python | 3.10, 3.11, 3.12, 3.13 (3.14 experimental) | Supported | CI workflows in `README.md` |
 | R | >= 3.5 | **Deprecated** | `docs/index.md` line 37 |
-| Apache Maven | 3.9.11+ | Build tool | `README.md` |
+| Apache Maven | 3.9.11+ | Build tool | `pom.xml` line 123 |
 | Apache Hadoop | 3.4.2 | Required | `pom.xml` |
 | Apache Kafka | 3.9.1 | Integration | Tech Spec Section 2.1 |
 | Apache Parquet | 1.16.0 | Data format | Tech Spec Section 2.1 |
@@ -1039,7 +1041,7 @@ graph LR
 | Data Format | Protobuf | 4.33.0 | Binary serialization format | Tech Spec Section 2.1 (F-008) |
 | Streaming | Apache Kafka Client | 3.9.1 | Kafka source/sink connector | Tech Spec Section 2.1 (F-003, F-008) |
 | Streaming | AWS Kinesis SDK | 1.15.3 | Kinesis source connector | Tech Spec Section 2.1 (F-003) |
-| ML | Breeze | 3.0.4 | Numerical processing for MLlib | Tech Spec Section 2.1 (F-004) |
+| ML | Breeze | 2.1.0 | Numerical processing for MLlib | `pom.xml` line 1134 |
 | Cluster | Fabric8 Kubernetes Client | 7.4.0 | Kubernetes cluster manager integration | Tech Spec Section 2.1 (F-007) |
 | Language Bridge | Py4J | 0.10.9.9 | Python-JVM bridge for PySpark | Tech Spec Section 2.1 (F-006) |
 | Connect | gRPC | 1.67.1 | Spark Connect client-server transport | Tech Spec Section 5.1 |
@@ -1051,7 +1053,7 @@ graph LR
 
 | Dependency | Version | Purpose | Source |
 |-----------|---------|---------|--------|
-| Apache Maven | 3.9.11+ | Build system | `README.md` |
+| Apache Maven | 3.9.11+ | Build system | `pom.xml` line 123 |
 | sbt | (project-defined) | Scala compilation and packaging | Repository build configuration |
 | Ruby | >= 3.0.0 | Documentation site build | `docs/Gemfile` |
 | Jekyll | ~> 4.4 | Documentation site generator | `docs/Gemfile` |
