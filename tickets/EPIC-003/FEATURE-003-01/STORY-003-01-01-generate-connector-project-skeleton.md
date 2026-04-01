@@ -18,39 +18,33 @@
   - **Then** it contains a `<dependency>` for `org.apache.spark:spark-sql_${scala.binary.version}` with `<scope>provided</scope>`, and three test-jar dependencies — `spark-core_${scala.binary.version}`, `spark-catalyst_${scala.binary.version}`, and `spark-sql_${scala.binary.version}` — each with `<type>test-jar</type>` and `<scope>test</scope>`, plus `scalacheck_${scala.binary.version}` with `<scope>test</scope>`, `spark-tags_${scala.binary.version}`, and `scala-parallel-collections_${scala.binary.version}`
   - `Source: connector/avro/pom.xml, lines 37–76`
 
-- **AC3 — POM Build Output Directories (Expected Output):**
-  - **Given** the project skeleton is generated
-  - **When** the `pom.xml` `<build>` section is inspected
-  - **Then** `<outputDirectory>` is set to `target/scala-${scala.binary.version}/classes` and `<testOutputDirectory>` is set to `target/scala-${scala.binary.version}/test-classes`
-  - `Source: connector/avro/pom.xml, lines 82–84`
+- **AC3 — POM Build Configuration, ArtifactId, and Properties (Expected Output):**
+  - **Given** the project skeleton is generated with connector name `"myformat"`
+  - **When** the `pom.xml` `<build>` and `<properties>` sections are inspected
+  - **Then** `<outputDirectory>` is set to `target/scala-${scala.binary.version}/classes`, `<testOutputDirectory>` is set to `target/scala-${scala.binary.version}/test-classes`, the `<properties>` section contains `<sbt.project.name>myformat</sbt.project.name>`, and the `<artifactId>` is set to `spark-myformat_2.13` — matching the naming convention where connector name `"avro"` maps to `artifactId` `spark-avro_2.13` and `sbt.project.name` `avro`
+  - `Source: connector/avro/pom.xml, lines 28–30, 82–84`
 
 - **AC4 — Directory Structure (Expected Output):**
   - **Given** the project skeleton is generated with connector name `"myformat"` and base package `"com.example.spark.sql.v2.myformat"`
   - **When** the directory structure is inspected
   - **Then** the following directories exist: `src/main/scala/com/example/spark/sql/v2/myformat/`, `src/test/scala/com/example/spark/sql/v2/myformat/`, and `src/main/resources/META-INF/services/`; and a `README.md` file exists at the generated project root
 
-- **AC5 — POM ArtifactId and Properties (Expected Output):**
-  - **Given** the project skeleton is generated with connector name `"myformat"`
-  - **When** the `pom.xml` `<properties>` section is inspected
-  - **Then** it contains `<sbt.project.name>myformat</sbt.project.name>`, and the `<artifactId>` is set to `spark-myformat_2.13` — matching the naming convention where connector name `"avro"` maps to `artifactId` `spark-avro_2.13` and `sbt.project.name` `avro`
-  - `Source: connector/avro/pom.xml, lines 28–30`
-
-- **AC6 — Empty Connector Name Validation (Input Validation):**
+- **AC5 — Empty Connector Name Validation (Input Validation):**
   - **Given** the connector name parameter is an empty string
   - **When** the generator is invoked
   - **Then** it returns an error message stating `"Connector name must be a non-empty string containing only lowercase alphanumeric characters and hyphens"`
 
-- **AC7 — Invalid Base Package Validation (Input Validation):**
+- **AC6 — Invalid Base Package Validation (Input Validation):**
   - **Given** the base package parameter contains invalid Java package characters (e.g., `"com.my company"` with a space)
   - **When** the generator validates input
   - **Then** it returns an error message stating `"Base package must be a valid Java package name (lowercase letters, digits, dots as separators)"`
 
-- **AC8 — Non-Writable Output Directory (Error Handling):**
+- **AC7 — Non-Writable Output Directory (Error Handling):**
   - **Given** the target output directory is not writable
   - **When** the generator attempts to create the project skeleton
   - **Then** it returns an error message specifying the absolute directory path and the underlying permission error, without creating any partial output
 
-- **AC9 — Single-Character Connector Name (Edge Case):**
+- **AC8 — Single-Character Connector Name (Edge Case):**
   - **Given** the connector name parameter is the single character `"x"` and the base package is `"org.apache.spark.sql.v2.x"`
   - **When** the generator creates the project skeleton
   - **Then** the generated `pom.xml` contains `<artifactId>spark-x_2.13</artifactId>` and `<sbt.project.name>x</sbt.project.name>`, the directory structure includes `src/main/scala/org/apache/spark/sql/v2/x/` and `src/test/scala/org/apache/spark/sql/v2/x/`, and `mvn validate` succeeds on the generated POM without errors
@@ -102,5 +96,5 @@
 - Generated project passes `mvn validate` and `mvn compile` with an empty source tree (POM structure is valid and all parent references resolve)
 - Input validation rejects empty, null, and invalid connector names with descriptive error messages specifying allowed characters
 - Input validation rejects empty, malformed, and invalid Java package names with descriptive error messages specifying the detected issue
-- Unit tests cover all 9 acceptance criteria and all 5 edge cases
+- Unit tests cover all 8 acceptance criteria and all 5 edge cases
 - Story is demo-able: running the generator with connector name `"myformat"` and base package `"com.example.spark.sql.v2.myformat"` produces a browsable, compilable Maven project that a reviewer can inspect and build
