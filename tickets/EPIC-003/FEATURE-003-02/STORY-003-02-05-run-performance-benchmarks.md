@@ -186,13 +186,13 @@ If the temp directory runs out of disk space during a write benchmark (e.g., whe
 
 ## Definition of Done
 
-- [ ] Benchmark harness produces output matching the Spark benchmark format with the 6-column metric header: Best Time(ms), Avg Time(ms), Stdev(ms), Rate(M/s), Per Row(ns), Relative
-- [ ] Read benchmarks cover all categories: single-column numeric scans (TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE), int+string scan, partition scan, repeated string, null-rate sensitivity (0%, 50%, 95%), wide-table scan (1,000 columns), and filter pushdown comparison (no filter, pushdown disabled, pushdown enabled)
-- [ ] Write benchmarks cover all categories: single-column output, multi-column output, partitioned output, bucketed output, and codec sweep across all supported codecs
-- [ ] Codec sweep iterates over all supported codecs (SNAPPY, ZSTANDARD, DEFLATE, BZIP2, XZ, UNCOMPRESSED) and compression level parameter sweeps (levels 1, 3, 5, 7, 9) for codecs that support compression levels
-- [ ] ZSTANDARD benchmark includes `bufferPool.enabled` variant tests (true and false) for each compression level
-- [ ] JDK 17 and JDK 21 produce separate output files with the naming convention: `<ConnectorName>ReadBenchmark-results.txt` / `<ConnectorName>WriteBenchmark-results.txt` for JDK 17, and `<ConnectorName>ReadBenchmark-jdk21-results.txt` / `<ConnectorName>WriteBenchmark-jdk21-results.txt` for JDK 21
-- [ ] `SPARK_GENERATE_BENCHMARK_FILES` environment variable controls whether benchmark results are written to output files
-- [ ] At least one concrete benchmark validates the Avro connector, producing output that matches the format of existing `AvroReadBenchmark-results.txt` and `AvroWriteBenchmark-results.txt`
-- [ ] All benchmarks execute without unhandled exceptions; failures in individual benchmark cases are reported with exception messages and do not abort the entire suite
-- [ ] Zero terms from the project-defined forbidden vocabulary list appear in any acceptance criteria text
+- Benchmark harness produces output matching the Spark benchmark format with the 6-column metric header: Best Time(ms), Avg Time(ms), Stdev(ms), Rate(M/s), Per Row(ns), Relative
+- Read benchmarks cover all categories: single-column numeric scans (TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE), int+string scan, partition scan, repeated string, null-rate sensitivity (0%, 50%, 95%), wide-table scan (1,000 columns), and filter pushdown comparison (no filter, pushdown disabled, pushdown enabled)
+- Write benchmarks cover all categories: single-column output, multi-column output, partitioned output, bucketed output, and codec sweep across all supported codecs
+- Codec sweep iterates over all supported codecs (SNAPPY, ZSTANDARD, DEFLATE, BZIP2, XZ, UNCOMPRESSED) and compression level parameter sweeps (levels 1, 3, 5, 7, 9) for codecs that support compression levels
+- ZSTANDARD benchmark includes `bufferPool.enabled` variant tests (true and false) for each compression level
+- JDK 17 and JDK 21 produce separate output files with the naming convention: `<ConnectorName>ReadBenchmark-results.txt` / `<ConnectorName>WriteBenchmark-results.txt` for JDK 17, and `<ConnectorName>ReadBenchmark-jdk21-results.txt` / `<ConnectorName>WriteBenchmark-jdk21-results.txt` for JDK 21
+- `SPARK_GENERATE_BENCHMARK_FILES` environment variable controls whether benchmark results are written to output files
+- At least one concrete benchmark validates the Avro connector, producing output that matches the format of existing `AvroReadBenchmark-results.txt` and `AvroWriteBenchmark-results.txt`
+- All benchmarks execute without unhandled exceptions; failures in individual benchmark cases are reported with exception messages and do not abort the entire suite
+- Zero terms from the project-defined forbidden vocabulary list appear in any acceptance criteria text

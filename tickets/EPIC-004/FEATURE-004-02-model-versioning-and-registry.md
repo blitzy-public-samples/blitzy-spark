@@ -8,11 +8,11 @@ Data scientists and ML engineers currently manage trained model artifacts manual
 
 | Story ID | Story Name | Description | Link |
 |----------|-----------|-------------|------|
-| STORY-004-02-01 | Register Trained Model Artifacts | Register a trained model with metadata in the registry | [STORY-004-02-01-register-trained-model-artifacts](./FEATURE-004-02/STORY-004-02-01-register-trained-model-artifacts.md) |
-| STORY-004-02-02 | Version Models with Lineage | Assign semantic versions and track data/code lineage per version | [STORY-004-02-02-version-models-with-lineage](./FEATURE-004-02/STORY-004-02-02-version-models-with-lineage.md) |
-| STORY-004-02-03 | Promote Models Across Stages | Move model versions through development, staging, and production stages | [STORY-004-02-03-promote-models-across-stages](./FEATURE-004-02/STORY-004-02-03-promote-models-across-stages.md) |
-| STORY-004-02-04 | Compare Model Versions | Side-by-side comparison of metrics and parameters across model versions | [STORY-004-02-04-compare-model-versions](./FEATURE-004-02/STORY-004-02-04-compare-model-versions.md) |
-| STORY-004-02-05 | Archive Deprecated Models | Mark and archive deprecated model versions to manage registry size | [STORY-004-02-05-archive-deprecated-models](./FEATURE-004-02/STORY-004-02-05-archive-deprecated-models.md) |
+| STORY-004-02-01 | Register Trained Model Artifacts | Register a trained model with metadata in the registry | [STORY-004-02-01](./FEATURE-004-02/STORY-004-02-01-register-trained-model-artifacts.md) |
+| STORY-004-02-02 | Version Models with Lineage | Assign semantic versions and track data/code lineage per version | [STORY-004-02-02](./FEATURE-004-02/STORY-004-02-02-version-models-with-lineage.md) |
+| STORY-004-02-03 | Promote Models Across Stages | Move model versions through development, staging, and production stages | [STORY-004-02-03](./FEATURE-004-02/STORY-004-02-03-promote-models-across-stages.md) |
+| STORY-004-02-04 | Compare Model Versions | Side-by-side comparison of metrics and parameters across model versions | [STORY-004-02-04](./FEATURE-004-02/STORY-004-02-04-compare-model-versions.md) |
+| STORY-004-02-05 | Archive Deprecated Models | Mark and archive deprecated model versions to manage registry size | [STORY-004-02-05](./FEATURE-004-02/STORY-004-02-05-archive-deprecated-models.md) |
 
 ## Dependencies
 

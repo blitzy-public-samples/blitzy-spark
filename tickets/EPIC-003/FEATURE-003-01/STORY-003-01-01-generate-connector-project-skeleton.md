@@ -50,6 +50,11 @@
   - **When** the generator attempts to create the project skeleton
   - **Then** it returns an error message specifying the absolute directory path and the underlying permission error, without creating any partial output
 
+- **AC9 — Single-Character Connector Name (Edge Case):**
+  - **Given** the connector name parameter is the single character `"x"` and the base package is `"org.apache.spark.sql.v2.x"`
+  - **When** the generator creates the project skeleton
+  - **Then** the generated `pom.xml` contains `<artifactId>spark-x_2.13</artifactId>` and `<sbt.project.name>x</sbt.project.name>`, the directory structure includes `src/main/scala/org/apache/spark/sql/v2/x/` and `src/test/scala/org/apache/spark/sql/v2/x/`, and `mvn validate` succeeds on the generated POM without errors
+
 ## Sub-Tasks
 
 - Create Maven POM template with parameterized `<parent>` reference (`spark-parent_2.13:4.1.0-SNAPSHOT`), `<artifactId>` (`spark-<name>_2.13`), `<name>` (`Spark <Name>`), and `<sbt.project.name>` property
@@ -97,5 +102,5 @@
 - Generated project passes `mvn validate` and `mvn compile` with an empty source tree (POM structure is valid and all parent references resolve)
 - Input validation rejects empty, null, and invalid connector names with descriptive error messages specifying allowed characters
 - Input validation rejects empty, malformed, and invalid Java package names with descriptive error messages specifying the detected issue
-- Unit tests cover all 8 acceptance criteria and all 5 edge cases
+- Unit tests cover all 9 acceptance criteria and all 5 edge cases
 - Story is demo-able: running the generator with connector name `"myformat"` and base package `"com.example.spark.sql.v2.myformat"` produces a browsable, compilable Maven project that a reviewer can inspect and build

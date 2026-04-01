@@ -118,18 +118,18 @@ Inferring schema from two data files where the same column is stored as IntegerT
 
 ## Definition of Done
 
-- [ ] Schema inference test class (`ConnectorSchemaInferenceTest`) is implemented as an abstract base class extending `QueryTest` with `SharedSparkSession`
-- [ ] Abstract methods `connectorFormat`, `testDataPath`, and `expectedSchema` are defined and documented
-- [ ] Primitive type test validates all 9 Spark primitive types (BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType, StringType, BinaryType) with exact type matching
-- [ ] Complex type tests validate ArrayType, MapType, and StructType with matching element types, key/value types, and field definitions
-- [ ] Decimal type test confirms precision and scale preservation (e.g., DecimalType(10, 2) not DecimalType(10, 0))
-- [ ] Date and timestamp tests confirm correct temporal type inference — DateType and TimestampType, not StringType or LongType fallback
-- [ ] Nested structure test validates 3-level nesting preservation with recursive field name and type verification
-- [ ] Error handling test validates that unsupported types produce `SparkException` or `AnalysisException` with descriptive messages identifying the column name and unsupported type
-- [ ] Schema comparison utility method produces readable diff output listing field-by-field mismatches between inferred and expected schemas
-- [ ] At least one concrete test class validates the Avro connector schema inference by extending `ConnectorSchemaInferenceTest` with `connectorFormat = "avro"`
-- [ ] All edge cases (empty directory, minimal/wide schemas, corrupt files, schema evolution, type widening) are covered by dedicated test methods
-- [ ] All tests pass in CI with both JDK 17 and JDK 21 runtime environments
-- [ ] Scaladoc documentation covers class-level usage, abstract method contracts, and extension guidance for new connectors
-- [ ] Zero forbidden vague terms appear in any acceptance criteria text — all criteria use precise, measurable language
-- [ ] Code review completed and approved by at least one maintainer
+- Schema inference test class (`ConnectorSchemaInferenceTest`) is implemented as an abstract base class extending `QueryTest` with `SharedSparkSession`
+- Abstract methods `connectorFormat`, `testDataPath`, and `expectedSchema` are defined and documented
+- Primitive type test validates all 9 Spark primitive types (BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType, StringType, BinaryType) with exact type matching
+- Complex type tests validate ArrayType, MapType, and StructType with matching element types, key/value types, and field definitions
+- Decimal type test confirms precision and scale preservation (e.g., DecimalType(10, 2) not DecimalType(10, 0))
+- Date and timestamp tests confirm correct temporal type inference — DateType and TimestampType, not StringType or LongType fallback
+- Nested structure test validates 3-level nesting preservation with recursive field name and type verification
+- Error handling test validates that unsupported types produce `SparkException` or `AnalysisException` with descriptive messages identifying the column name and unsupported type
+- Schema comparison utility method produces readable diff output listing field-by-field mismatches between inferred and expected schemas
+- At least one concrete test class validates the Avro connector schema inference by extending `ConnectorSchemaInferenceTest` with `connectorFormat = "avro"`
+- All edge cases (empty directory, minimal/wide schemas, corrupt files, schema evolution, type widening) are covered by dedicated test methods
+- All tests pass in CI with both JDK 17 and JDK 21 runtime environments
+- Scaladoc documentation covers class-level usage, abstract method contracts, and extension guidance for new connectors
+- Zero forbidden vague terms appear in any acceptance criteria text — all criteria use precise, measurable language
+- Code review completed and approved by at least one maintainer

@@ -62,20 +62,20 @@
 
 ## Sub-Tasks
 
-- [ ] Create abstract test class `ConnectorPushdownComplianceTest` extending `QueryTest` with `SharedSparkSession`
-- [ ] Define abstract method `def connectorFormat: String` returning the DataSource format identifier (e.g., `"avro"`)
-- [ ] Define abstract method `def pushdownConfigKey: String` returning the `SQLConf` key that enables or disables pushdown for the connector
-- [ ] Implement helper method to extract `BatchScanExec` from the executed plan (based on `AvroSuite` lines 3226–3228: `df.queryExecution.executedPlan collectFirst { case BatchScanExec(_, f: Scan, ...) => f }`)
-- [ ] Implement helper method to extract the `Filter` condition from the optimized plan (based on `AvroSuite` lines 3216–3218: `df.queryExecution.optimizedPlan.collectFirst { case f: Filter => f.condition }`)
-- [ ] Implement equality filter pushdown test (`WHERE id = 5000`)
-- [ ] Implement range filter pushdown tests (`>`, `>=`, `<`, `<=`) with expected row count assertions
-- [ ] Implement in-set filter pushdown test (`WHERE id IN (...)`)
-- [ ] Implement is-null and is-not-null filter pushdown tests with null-percentage assertions
-- [ ] Implement non-pushable predicate fallback test using a UDF-based filter expression
-- [ ] Implement partition-vs-data filter separation test with `partitionFilters` and `dataFilters` assertions
-- [ ] Implement pushdown-disabled configuration test using `withSQLConf` to disable the pushdown flag
-- [ ] Write concrete unit tests using the Avro connector as the reference implementation to validate the base class
-- [ ] Document usage and extension points in Scaladoc comments on the abstract test class
+- Create abstract test class `ConnectorPushdownComplianceTest` extending `QueryTest` with `SharedSparkSession`
+- Define abstract method `def connectorFormat: String` returning the DataSource format identifier (e.g., `"avro"`)
+- Define abstract method `def pushdownConfigKey: String` returning the `SQLConf` key that enables or disables pushdown for the connector
+- Implement helper method to extract `BatchScanExec` from the executed plan (based on `AvroSuite` lines 3226–3228: `df.queryExecution.executedPlan collectFirst { case BatchScanExec(_, f: Scan, ...) => f }`)
+- Implement helper method to extract the `Filter` condition from the optimized plan (based on `AvroSuite` lines 3216–3218: `df.queryExecution.optimizedPlan.collectFirst { case f: Filter => f.condition }`)
+- Implement equality filter pushdown test (`WHERE id = 5000`)
+- Implement range filter pushdown tests (`>`, `>=`, `<`, `<=`) with expected row count assertions
+- Implement in-set filter pushdown test (`WHERE id IN (...)`)
+- Implement is-null and is-not-null filter pushdown tests with null-percentage assertions
+- Implement non-pushable predicate fallback test using a UDF-based filter expression
+- Implement partition-vs-data filter separation test with `partitionFilters` and `dataFilters` assertions
+- Implement pushdown-disabled configuration test using `withSQLConf` to disable the pushdown flag
+- Write concrete unit tests using the Avro connector as the reference implementation to validate the base class
+- Document usage and extension points in Scaladoc comments on the abstract test class
 
 ## Edge Cases
 
@@ -117,10 +117,10 @@ Applying a filter with implicit type coercion (e.g., filtering an integer column
 
 ## Definition of Done
 
-- [ ] Pushdown compliance test class validates all 6 filter types: equality, range (4 operators), in-set, is-null, is-not-null, and non-pushable fallback
-- [ ] Plan inspection helpers extract the `BatchScanExec` node and its `dataFilters`/`partitionFilters` from the executed plan
-- [ ] Partition-vs-data filter separation test confirms that partition filters are routed to `partitionFilters` and data filters to `dataFilters`
-- [ ] Configuration-disabled test validates graceful degradation with all filters applied Spark-side when pushdown is turned off
-- [ ] At least one concrete test validates the Avro connector's `pushDataFilters` implementation as a reference integration
-- [ ] All tests pass in CI with both JDK 17 and JDK 21
-- [ ] No forbidden terms appear in any acceptance criteria text
+- Pushdown compliance test class validates all 6 filter types: equality, range (4 operators), in-set, is-null, is-not-null, and non-pushable fallback
+- Plan inspection helpers extract the `BatchScanExec` node and its `dataFilters`/`partitionFilters` from the executed plan
+- Partition-vs-data filter separation test confirms that partition filters are routed to `partitionFilters` and data filters to `dataFilters`
+- Configuration-disabled test validates graceful degradation with all filters applied Spark-side when pushdown is turned off
+- At least one concrete test validates the Avro connector's `pushDataFilters` implementation as a reference integration
+- All tests pass in CI with both JDK 17 and JDK 21
+- No forbidden terms appear in any acceptance criteria text
