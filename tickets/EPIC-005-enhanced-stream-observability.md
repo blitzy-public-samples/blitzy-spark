@@ -4,17 +4,6 @@
 
 Apache Spark Structured Streaming monitoring is limited to basic metrics exposed through `StreamingQueryProgress`; production teams operating streaming pipelines lack proactive health monitoring, backpressure detection, and SLA tracking capabilities, leading to delayed incident response and data delivery failures. This epic delivers an enhanced observability layer that extends the Spark Web UI and the Dropwizard Metrics 4.2.33 integration with real-time stream health dashboards, automated backpressure detection, configurable SLA target management, resource scaling recommendations, and exportable observability reports — replacing reactive troubleshooting with proactive, metrics-driven monitoring for both micro-batch and continuous processing modes. The scope covers stream health monitoring (processing rates, watermark progression, state store size, processing lag, checkpoint status) and backpressure/SLA management (backpressure condition detection, SLA target configuration, breach alerting, scaling recommendations, observability report generation) but does NOT include auto-scaling implementation or modifications to stream processing execution logic.
 
-### Source Context
-
-- `Source: sql/core/` — StreamingQuery, StreamingQueryProgress, watermark logic, StateStore, offset tracking, checkpoint logic
-- `Source: streaming/` — Legacy DStream API with rate limiter and backpressure patterns
-- `Source: core/src/main/scala/org/apache/spark/metrics/` — Dropwizard MetricsSystem, MetricRegistry, Source/Sink abstractions, PrometheusServlet, MetricsServlet
-- `Source: docs/structured-streaming-programming-guide.md` — Structured Streaming programming model reference
-- `Source: docs/streaming/performance-tips.md` — Async progress tracking, continuous processing mode, checkpoint interval configuration
-- `Source: docs/monitoring.md` — Monitoring and instrumentation guide covering Web UI, REST API, metrics sinks (Prometheus, Graphite, StatsD, JMX, CSV, Console), and event logging
-- `Source: docs/web-ui.md` — Web UI Structured Streaming tab, Jobs tab, Stages tab, and SQL tab
-- `Source: connector/kafka-0-10/` — Kafka source integration for consumer offset lag tracking and per-partition backpressure
-
 ## Features Index
 
 | Feature ID | Feature Name | Description | Link |

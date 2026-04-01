@@ -6,60 +6,71 @@
 **I want to** generate structured observability reports in JSON and CSV formats containing four sections — (1) backpressure events log with timestamps, query IDs, detection method, and duration; (2) SLA compliance summary with per-query target versus observed values, violation count, and compliance percentage; (3) resource utilization summary with executor count, CPU utilization, memory utilization, and state store sizes over the reporting window; and (4) stream health snapshots with processing rates, watermark progression, and checkpoint status — accessible via REST API at `/api/v1/applications/[app-id]/streaming/observability/report` with query parameters for format (`json` or `csv`), time range (`startTime`, `endTime`), and query filter (`queryName`),
 **so that** data engineering teams can generate on-demand and scheduled compliance reports for stakeholders without manual data collection, reducing weekly reporting effort from 4 hours of manual metric gathering to under 30 seconds of API calls and enabling audit-ready documentation of streaming pipeline health.
 
-### Source Context
-
-- `Source: docs/monitoring.md` — REST API `/api/v1` endpoints (`/applications`, `/applications/[app-id]/jobs`, `/applications/[app-id]/streaming`), event logging, metrics sinks (Prometheus, Graphite, StatsD, JMX, CSV, Console)
-- `Source: core/src/main/scala/org/apache/spark/status/AppStatusStore.scala` — KVStore-backed historical data providing executor summaries (`executorList`), task metrics, stage data, and application info used to populate the resource utilization section of the report
-- `Source: core/src/main/scala/org/apache/spark/status/api/v1/ApiRootResource.scala` — REST API root resource at `@Path("/v1")` with JAX-RS endpoint registration patterns and JacksonMessageWriter for JSON serialization
-- `Source: core/src/main/scala/org/apache/spark/status/api/v1/OneApplicationResource.scala` — Per-application REST resource pattern with `@GET`, `@Path`, `@QueryParam` annotations and `withUI(_.store.*)` data access pattern
-- `Source: core/src/main/scala/org/apache/spark/status/api/v1/JacksonMessageWriter.scala` — Jackson JSON serialization for REST API responses
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/runtime/ProgressReporter.scala` — `StreamingQueryProgress` reporting with `progressBuffer`, ISO8601 timestamp formatting (`yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`), and per-batch metrics (inputRowsPerSecond, processedRowsPerSecond, durationMs, watermark)
-
 ## Acceptance Criteria
 
-**AC-1 (Input Validation — Format Parameter):**
-- **Given** a REST API request to `/api/v1/applications/[app-id]/streaming/observability/report?format=json`
-- **When** the `format` parameter is `json` or `csv`
-- **Then** the server accepts the request and returns the report in the specified format with Content-Type `application/json` or `text/csv` respectively
+### AC-1: Input Validation — Format Parameter
 
-**AC-2 (Input Validation — Time Range):**
-- **Given** a REST API request with `startTime=2024-01-01T00:00:00Z&endTime=2024-01-01T23:59:59Z`
-- **When** `startTime` is before `endTime` and both are valid ISO8601 timestamps
-- **Then** the report includes only events and metrics that fall within the specified time range
+```gherkin
+Given a REST API request to /api/v1/applications/[app-id]/streaming/observability/report?format=json
+When the format parameter is "json" or "csv"
+Then the server accepts the request and returns the report in the specified format with Content-Type application/json or text/csv respectively
+```
 
-**AC-3 (Expected Output — JSON Report):**
-- **Given** a streaming query `ordersStream` that experienced 3 backpressure events and 5 SLA violations in the last hour
-- **When** a JSON format report is requested
-- **Then** the response contains a JSON object with four top-level keys:
-  - `backpressureEvents` — array of 3 objects each with fields: `timestamp`, `queryId`, `queryName`, `detectionMethod`, `durationMs`
-  - `slaCompliance` — object with fields: `queryName`, `latencyTarget`, `latencyP99`, `throughputTarget`, `throughputP50`, `violationCount` (value: 5), `compliancePercentage`
-  - `resourceUtilization` — object with fields: `executorCount`, `avgCpuPercent`, `avgMemoryPercent`, `peakMemoryPercent`, `stateStoreSizeBytes`
-  - `streamHealth` — object with fields: `avgInputRowsPerSec`, `avgProcessedRowsPerSec`, `currentWatermark`, `lastCheckpointTimestamp`, `lastCheckpointDurationMs`
+### AC-2: Input Validation — Time Range
 
-**AC-4 (Expected Output — CSV Report):**
-- **Given** the same streaming query data as AC-3
-- **When** a CSV format report is requested
-- **Then** the response contains a CSV file with a header row and data rows, where each section is separated by a blank line and a section header row (e.g., `# Backpressure Events`, `# SLA Compliance`, `# Resource Utilization`, `# Stream Health`), and each row within a section uses comma-separated values matching the JSON field names as column headers
+```gherkin
+Given a REST API request with startTime=2024-01-01T00:00:00Z and endTime=2024-01-01T23:59:59Z
+When startTime is before endTime and both are valid ISO8601 timestamps
+Then the report includes only events and metrics that fall within the specified time range
+```
 
-**AC-5 (Error Handling — Invalid Format):**
-- **Given** a REST API request with `format=xml`
-- **When** the `format` parameter is not `json` or `csv`
-- **Then** the server returns HTTP 400 Bad Request with a JSON error body containing the message `Invalid format parameter. Accepted values: json, csv` and the invalid value received
+### AC-3: Expected Output — JSON Report
 
-**AC-6 (Error Handling — No Data Available):**
-- **Given** a streaming application that has just started with no completed micro-batches
-- **When** an observability report is requested
-- **Then** the server returns HTTP 200 with an empty report structure (empty arrays and zero-valued metrics) rather than HTTP 404 or 500, and each section includes a `status` field set to `no_data_available`
+```gherkin
+Given a streaming query "ordersStream" that experienced 3 backpressure events and 5 SLA violations in the last hour
+When a JSON format report is requested
+Then the response contains a JSON object with four top-level keys: backpressureEvents (array of 3 objects each with fields: timestamp, queryId, queryName, detectionMethod, durationMs), slaCompliance (object with fields: queryName, latencyTarget, latencyP99, throughputTarget, throughputP50, violationCount with value 5, compliancePercentage), resourceUtilization (object with fields: executorCount, avgCpuPercent, avgMemoryPercent, peakMemoryPercent, stateStoreSizeBytes), and streamHealth (object with fields: avgInputRowsPerSec, avgProcessedRowsPerSec, currentWatermark, lastCheckpointTimestamp, lastCheckpointDurationMs)
+```
 
-**AC-7 (Edge Case — Multi-Query Report):**
-- **Given** 3 streaming queries running in the same application
-- **When** a report is requested without a `queryName` filter
-- **Then** the report aggregates data from all 3 queries, with the `backpressureEvents` array containing events from all queries sorted by timestamp descending, `slaCompliance` containing an entry per query, and `resourceUtilization` showing application-level aggregates
+### AC-4: Expected Output — CSV Report
 
-**AC-8 (Edge Case — Large Time Range):**
-- **Given** a report request spanning 7 days with over 100,000 completed micro-batches
-- **When** the report is generated
-- **Then** the response is returned within 30 seconds, summary metrics are computed using pre-aggregated data from `AppStatusStore` rather than re-scanning all individual batch records, and the report includes a `metadata` section with `generationTimeMs` and `batchesAnalyzed` count
+```gherkin
+Given the same streaming query data as AC-3
+When a CSV format report is requested
+Then the response contains a CSV file with a header row and data rows, where each section is separated by a blank line and a section header row (e.g., "# Backpressure Events", "# SLA Compliance", "# Resource Utilization", "# Stream Health"), and each row within a section uses comma-separated values matching the JSON field names as column headers
+```
+
+### AC-5: Error Handling — Invalid Format
+
+```gherkin
+Given a REST API request with format=xml
+When the format parameter is not "json" or "csv"
+Then the server returns HTTP 400 Bad Request with a JSON error body containing the message "Invalid format parameter. Accepted values: json, csv" and the invalid value received
+```
+
+### AC-6: Error Handling — No Data Available
+
+```gherkin
+Given a streaming application that has just started with no completed micro-batches
+When an observability report is requested
+Then the server returns HTTP 200 with an empty report structure (empty arrays and zero-valued metrics) rather than HTTP 404 or 500, and each section includes a status field set to "no_data_available"
+```
+
+### AC-7: Edge Case — Multi-Query Report
+
+```gherkin
+Given 3 streaming queries running in the same application
+When a report is requested without a queryName filter
+Then the report aggregates data from all 3 queries, with the backpressureEvents array containing events from all queries sorted by timestamp descending, slaCompliance containing an entry per query, and resourceUtilization showing application-level aggregates
+```
+
+### AC-8: Edge Case — Large Time Range
+
+```gherkin
+Given a report request spanning 7 days with over 100,000 completed micro-batches
+When the report is generated
+Then the response is returned within 30 seconds, summary metrics are computed using pre-aggregated data from AppStatusStore rather than re-scanning all individual batch records, and the report includes a metadata section with generationTimeMs and batchesAnalyzed count
+```
 
 ## Sub-Tasks
 

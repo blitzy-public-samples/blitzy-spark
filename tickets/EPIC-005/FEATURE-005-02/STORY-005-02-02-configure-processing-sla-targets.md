@@ -6,59 +6,63 @@
 **I want to** configure per-streaming-query SLA targets consisting of a maximum processing latency (in milliseconds) and a minimum throughput (in rows per second) via SparkConf properties (`spark.streaming.sla.<queryName>.maxLatencyMs` and `spark.streaming.sla.<queryName>.minThroughputRowsPerSec`), with support for global defaults via `spark.streaming.sla.default.maxLatencyMs` and `spark.streaming.sla.default.minThroughputRowsPerSec`,
 **so that** data platform teams can define explicit, measurable performance contracts for each streaming pipeline, replacing ad-hoc latency monitoring with formal SLA targets that enable automated breach detection and reduce SLA violation response time by up to 70%.
 
-### Source References
-
-- `Source: docs/configuration.md` — Spark configuration property patterns, time/byte unit formats, precedence rules (SparkConf, spark-defaults.conf, --conf flags)
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/runtime/StreamExecution.scala` — Streaming query execution lifecycle, SparkSession and SparkConf access during query startup
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/classic/StreamingQuery.scala` — StreamingQuery API providing access to query name and progress reporting
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/classic/StreamingQueryManager.scala` — StreamingQueryManager managing active queries and StreamingQueryProgress reporting
-- `Source: docs/monitoring.md` — Monitoring and instrumentation guide covering metrics sinks and REST API endpoints
-
----
-
 ## Acceptance Criteria
 
 ### AC-1: Input Validation — Per-Query Configuration Loading
 
-- **Given** a SparkConf with property `spark.streaming.sla.myQuery.maxLatencyMs` set to `5000`
-- **When** a streaming query named "myQuery" starts
-- **Then** the SLA manager loads the maximum latency target of 5000 milliseconds for that specific query and uses it for SLA evaluation on every completed micro-batch
+```gherkin
+Given a SparkConf with property spark.streaming.sla.myQuery.maxLatencyMs set to 5000
+When a streaming query named "myQuery" starts
+Then the SLA manager loads the maximum latency target of 5000 milliseconds for that specific query and uses it for SLA evaluation on every completed micro-batch
+```
 
 ### AC-2: Input Validation — Negative Value Rejection
 
-- **Given** a SparkConf with `spark.streaming.sla.default.maxLatencyMs` set to a negative value (`-100`)
-- **When** the streaming query attempts to start
-- **Then** the system throws an `IllegalArgumentException` with a message containing the property name `spark.streaming.sla.default.maxLatencyMs` and specifying that the value must be a positive integer greater than zero
+```gherkin
+Given a SparkConf with spark.streaming.sla.default.maxLatencyMs set to a negative value (-100)
+When the streaming query attempts to start
+Then the system throws an IllegalArgumentException with a message containing the property name spark.streaming.sla.default.maxLatencyMs and specifying that the value must be a positive integer greater than zero
+```
 
 ### AC-3: Expected Output — Latency SLA Violation Detection
 
-- **Given** a streaming query "ordersStream" with `spark.streaming.sla.ordersStream.maxLatencyMs` set to `3000`
-- **When** a micro-batch completes with triggerExecution duration of 3500 milliseconds (reported by `StreamingQueryProgress.durationMs`)
-- **Then** the SLA evaluation marks this batch as a latency SLA violation and records the query name "ordersStream", the target of 3000ms, the observed value of 3500ms, and the batch ID
+```gherkin
+Given a streaming query "ordersStream" with spark.streaming.sla.ordersStream.maxLatencyMs set to 3000
+When a micro-batch completes with triggerExecution duration of 3500 milliseconds (reported by StreamingQueryProgress.durationMs)
+Then the SLA evaluation marks this batch as a latency SLA violation and records the query name "ordersStream", the target of 3000ms, the observed value of 3500ms, and the batch ID
+```
 
 ### AC-4: Expected Output — Throughput SLA Violation Detection
 
-- **Given** a streaming query "eventsStream" with `spark.streaming.sla.eventsStream.minThroughputRowsPerSec` set to `10000`
-- **When** a micro-batch completes with `processedRowsPerSecond` of 8500 as reported by `StreamingQueryProgress`
-- **Then** the SLA evaluation marks this batch as a throughput SLA violation and records the query name "eventsStream", the target of 10000 rows/sec, the observed value of 8500 rows/sec, and the batch ID
+```gherkin
+Given a streaming query "eventsStream" with spark.streaming.sla.eventsStream.minThroughputRowsPerSec set to 10000
+When a micro-batch completes with processedRowsPerSecond of 8500 as reported by StreamingQueryProgress
+Then the SLA evaluation marks this batch as a throughput SLA violation and records the query name "eventsStream", the target of 10000 rows/sec, the observed value of 8500 rows/sec, and the batch ID
+```
 
 ### AC-5: Error Handling — Missing Configuration Graceful Degradation
 
-- **Given** a streaming query "analyticsStream" with no per-query SLA properties and no default SLA properties configured in SparkConf
-- **When** the query starts and completes micro-batches
-- **Then** no SLA evaluation is performed for that query, no errors are thrown, and the SLA status is reported as "unconfigured" in the query status metadata
+```gherkin
+Given a streaming query "analyticsStream" with no per-query SLA properties and no default SLA properties configured in SparkConf
+When the query starts and completes micro-batches
+Then no SLA evaluation is performed for that query, no errors are thrown, and the SLA status is reported as "unconfigured" in the query status metadata
+```
 
 ### AC-6: Edge Case — Per-Query Override Takes Precedence Over Global Default
 
-- **Given** `spark.streaming.sla.default.maxLatencyMs` set to `5000` and `spark.streaming.sla.myQuery.maxLatencyMs` set to `2000`
-- **When** a streaming query named "myQuery" starts
-- **Then** the per-query value of 2000ms takes precedence over the default of 5000ms for SLA evaluation of the "myQuery" streaming query
+```gherkin
+Given spark.streaming.sla.default.maxLatencyMs set to 5000 and spark.streaming.sla.myQuery.maxLatencyMs set to 2000
+When a streaming query named "myQuery" starts
+Then the per-query value of 2000ms takes precedence over the default of 5000ms for SLA evaluation of the "myQuery" streaming query
+```
 
 ### AC-7: Edge Case — Runtime Reconfiguration Without Query Restart
 
-- **Given** a running streaming query with `spark.streaming.sla.myQuery.maxLatencyMs` set to `5000`
-- **When** the property is updated via `sparkSession.conf.set("spark.streaming.sla.myQuery.maxLatencyMs", "3000")` while the query is running
-- **Then** the SLA target is updated to 3000ms starting from the next micro-batch without requiring a query restart
+```gherkin
+Given a running streaming query with spark.streaming.sla.myQuery.maxLatencyMs set to 5000
+When the property is updated via sparkSession.conf.set("spark.streaming.sla.myQuery.maxLatencyMs", "3000") while the query is running
+Then the SLA target is updated to 3000ms starting from the next micro-batch without requiring a query restart
+```
 
 ---
 

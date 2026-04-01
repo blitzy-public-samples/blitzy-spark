@@ -4,10 +4,6 @@
 
 Production Structured Streaming workloads lack built-in backpressure detection and SLA tracking; operations teams cannot define processing time targets or receive alerts when streams fall behind, leading to silent data delivery delays and undetected pipeline degradation. This feature introduces backpressure detection, configurable SLA targets, automated alerting, resource scaling recommendations, and exportable observability reports for proactive stream management. It extends the streaming execution layer and the Spark metrics system (Dropwizard 4.2.33) with five capabilities: automatic backpressure condition detection derived from processing-time-to-trigger-interval ratios and input-rate-to-processing-rate comparisons, SLA target configuration for per-query latency and throughput targets, SLA breach alerting via the metrics sink infrastructure (Prometheus, JMX, Graphite), resource scaling recommendations based on observed performance patterns, and structured observability report generation in JSON and CSV formats.
 
-### Technical Context
-
-Backpressure detection logic draws from the legacy DStream rate limiter pattern (`streaming/` module) and adapts it for Structured Streaming using `StreamingQueryProgress` metrics. SLA management integrates with the Dropwizard MetricsSystem (`core/src/main/scala/org/apache/spark/metrics/MetricsSystem.scala`) for metrics exposure and alerting. The `AppStatusStore` (`core/src/main/scala/org/apache/spark/status/AppStatusStore.scala`) provides historical data for trend analysis and scaling recommendations. Observability reports use the REST API endpoint patterns from `docs/monitoring.md` (e.g., `/api/v1/applications/[app-id]/streaming`).
-
 ## User Stories Index
 
 | Story ID | Story Name | Description | Link |
@@ -30,21 +26,6 @@ Backpressure detection logic draws from the legacy DStream rate limiter pattern 
 - **StreamingQueryProgress** (`sql/core/` — `StreamingQuery.scala`, `StreamingQueryManager.scala`) — Per-batch input rate, processing rate, batch duration, and trigger execution metrics that feed backpressure detection and SLA evaluation logic
 - **MetricsReporter** (`sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/runtime/MetricsReporter.scala`) — Existing streaming metrics reporting infrastructure extended to publish backpressure and SLA metrics
 - **Kafka Connector** (`connector/kafka-0-10/`) — Kafka-specific consumer group offset lag metrics and per-partition offset tracking used for source-level backpressure detection in Kafka-sourced streaming queries
-
-### Source References
-
-- `Source: streaming/` — Legacy DStream API with rate limiter (backpressure reference pattern)
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/classic/StreamingQuery.scala` — StreamingQuery API
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/classic/StreamingQueryManager.scala` — StreamingQueryProgress metrics
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/runtime/MetricsReporter.scala` — Streaming metrics reporting
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/runtime/AsyncProgressTrackingMicroBatchExecution.scala` — Async progress tracking
-- `Source: core/src/main/scala/org/apache/spark/metrics/MetricsSystem.scala` — Dropwizard metrics system with sink infrastructure
-- `Source: core/src/main/scala/org/apache/spark/status/AppStatusStore.scala` — Historical status data
-- `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/state/StateStore.scala` — State store metrics and lifecycle
-- `Source: docs/monitoring.md` — REST API endpoints, metrics sinks, Prometheus integration
-- `Source: docs/streaming/performance-tips.md` — Async progress tracking, continuous processing, latency optimization
-- `Source: docs/web-ui.md` — Structured Streaming tab (Web UI extension points)
-- `Source: connector/kafka-0-10/` — Kafka source offset tracking for lag-based backpressure detection
 
 ## Definition of Done
 

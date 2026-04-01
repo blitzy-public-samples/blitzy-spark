@@ -2,9 +2,7 @@
 
 ## Epic Summary
 
-Data pipelines today lack built-in quality gates, forcing teams to integrate and maintain external tools such as Great Expectations and Deequ — adding operational complexity, increasing deployment surface area, and delaying detection of data defects. A native Declarative Data Quality Validation Framework embedded within the Apache Spark DataFrame API eliminates these external dependencies, reduces pipeline failure rates, and enables data engineers to define, enforce, and monitor quality rules as a first-class part of their Spark workloads.
-
-This framework leverages the Catalyst rule engine (`Source: sql/catalyst/`) and the DataSource V2 API (`Source: sql/core/`) to provide declarative quality validation on DataFrames, with quality metrics exposed through the Spark Web UI (`Source: core/src/main/scala/org/apache/spark/ui/`) and the Dropwizard Metrics subsystem (`Source: core/src/main/scala/org/apache/spark/metrics/`). The scope covers quality rule definition, enforcement, severity configuration, metrics computation, trend tracking, and report generation; it does NOT replace external data profiling tools or implement data cataloging functionality.
+Data pipelines today lack built-in quality gates, forcing teams to integrate and maintain external tools such as Great Expectations and Deequ — adding operational complexity, increasing deployment surface area, and delaying detection of data defects. A native Declarative Data Quality Validation Framework embedded within the Apache Spark DataFrame API eliminates these external dependencies by leveraging the Catalyst rule engine (`Source: sql/catalyst/`) and the DataSource V2 API (`Source: sql/core/`) to provide declarative quality validation, with quality metrics exposed through the Spark Web UI and the Dropwizard Metrics subsystem. The scope covers quality rule definition, enforcement, severity configuration, metrics computation, trend tracking, and report generation; it does NOT replace external data profiling tools or implement data cataloging functionality.
 
 ## Features Index
 

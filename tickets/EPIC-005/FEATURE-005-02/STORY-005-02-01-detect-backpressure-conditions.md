@@ -6,51 +6,63 @@
 **I want to** automatically detect backpressure conditions in Structured Streaming queries when the processing time exceeds a configurable percentage (default 90%) of the trigger interval for 3 or more consecutive micro-batches, or when the input row rate (`inputRowsPerSecond` from `StreamingQueryProgress`) exceeds the processing row rate (`processedRowsPerSecond`) by a configurable threshold (default 20%),
 **So that** pipeline degradation is identified within 3 trigger intervals instead of being discovered hours later through downstream data staleness, reducing mean-time-to-detection from an average of 45 minutes to under 2 minutes and preventing silent data delivery delays that affect downstream consumers.
 
-**Secondary Persona:** As a streaming application developer, I need programmatic access to backpressure events through the `StreamingQueryListener` bus so that I can build automated remediation workflows triggered by backpressure conditions.
-
 ## Acceptance Criteria
 
 ### AC-1: Input Validation — Threshold Configuration Acceptance
 
-- **Given** a streaming query with `spark.streaming.backpressure.triggerThreshold` set to a value between 0.1 and 1.0
-- **When** the configuration is loaded at query startup
-- **Then** the system accepts the threshold and applies it for backpressure evaluation on each micro-batch
+```gherkin
+Given a streaming query with spark.streaming.backpressure.triggerThreshold set to a value between 0.1 and 1.0
+When the configuration is loaded at query startup
+Then the system accepts the threshold and applies it for backpressure evaluation on each micro-batch
+```
 
 ### AC-2: Expected Output — Processing Time Backpressure Detection
 
-- **Given** a running Structured Streaming query with a trigger interval of 10 seconds and a trigger threshold of 0.9
-- **When** the `triggerExecution` duration reported in `StreamingQueryProgress` exceeds 9000 milliseconds for 3 consecutive micro-batches
-- **Then** a backpressure event is emitted containing the query ID, query name, trigger interval, observed processing times for the 3 batches, and the threshold value
+```gherkin
+Given a running Structured Streaming query with a trigger interval of 10 seconds and a trigger threshold of 0.9
+When the triggerExecution duration reported in StreamingQueryProgress exceeds 9000 milliseconds for 3 consecutive micro-batches
+Then a backpressure event is emitted containing the query ID, query name, trigger interval, observed processing times for the 3 batches, and the threshold value
+```
 
 ### AC-3: Expected Output — Rate Imbalance Backpressure Detection
 
-- **Given** a running Structured Streaming query with `spark.streaming.backpressure.rateImbalanceThreshold` set to 0.2
-- **When** `inputRowsPerSecond` exceeds `processedRowsPerSecond` by more than 20% for 3 consecutive micro-batches
-- **Then** a rate-imbalance backpressure event is emitted containing the query ID, input rates, processing rates, and the imbalance ratio for each of the 3 batches
+```gherkin
+Given a running Structured Streaming query with spark.streaming.backpressure.rateImbalanceThreshold set to 0.2
+When inputRowsPerSecond exceeds processedRowsPerSecond by more than 20% for 3 consecutive micro-batches
+Then a rate-imbalance backpressure event is emitted containing the query ID, input rates, processing rates, and the imbalance ratio for each of the 3 batches
+```
 
 ### AC-4: Error Handling — Null or Zero Progress Data
 
-- **Given** a Structured Streaming query where `StreamingQueryProgress` returns null or contains zero values for `inputRowsPerSecond` and `processedRowsPerSecond`
-- **When** the backpressure detector evaluates the batch
-- **Then** the detector skips the evaluation for that batch without throwing an exception and logs a warning message with the query ID and batch ID
+```gherkin
+Given a Structured Streaming query where StreamingQueryProgress returns null or contains zero values for inputRowsPerSecond and processedRowsPerSecond
+When the backpressure detector evaluates the batch
+Then the detector skips the evaluation for that batch without throwing an exception and logs a warning message with the query ID and batch ID
+```
 
 ### AC-5: Edge Case — Continuous Processing Mode
 
-- **Given** a Structured Streaming query running in continuous processing mode (`Trigger.Continuous`) where `triggerExecution` duration is not applicable
-- **When** the backpressure detector is invoked
-- **Then** the detector uses only the rate-imbalance method (`inputRowsPerSecond` vs `processedRowsPerSecond`) and ignores the trigger-time-based detection
+```gherkin
+Given a Structured Streaming query running in continuous processing mode (Trigger.Continuous) where triggerExecution duration is not applicable
+When the backpressure detector is invoked
+Then the detector uses only the rate-imbalance method (inputRowsPerSecond vs processedRowsPerSecond) and ignores the trigger-time-based detection
+```
 
 ### AC-6: Kafka-Specific Backpressure — Consumer Lag Detection
 
-- **Given** a Structured Streaming query reading from a Kafka source via the kafka-0-10 connector
-- **When** the consumer lag (difference between latest offset and committed offset) exceeds a configurable threshold of 10000 offsets per partition
-- **Then** a source-specific backpressure event is emitted containing the topic, partition, current lag, and threshold value
+```gherkin
+Given a Structured Streaming query reading from a Kafka source via the kafka-0-10 connector
+When the consumer lag (difference between latest offset and committed offset) exceeds a configurable threshold of 10000 offsets per partition
+Then a source-specific backpressure event is emitted containing the topic, partition, current lag, and threshold value
+```
 
 ### AC-7: Recovery — Backpressure Resolved Event
 
-- **Given** a backpressure condition that was previously detected
-- **When** the processing time drops below the trigger threshold for 3 consecutive micro-batches AND the rate imbalance drops below the configured threshold
-- **Then** a backpressure-resolved event is emitted containing the query ID, recovery timestamp, and the number of batches that were in backpressure state
+```gherkin
+Given a backpressure condition that was previously detected
+When the processing time drops below the trigger threshold for 3 consecutive micro-batches AND the rate imbalance drops below the configured threshold
+Then a backpressure-resolved event is emitted containing the query ID, recovery timestamp, and the number of batches that were in backpressure state
+```
 
 ## Sub-Tasks
 

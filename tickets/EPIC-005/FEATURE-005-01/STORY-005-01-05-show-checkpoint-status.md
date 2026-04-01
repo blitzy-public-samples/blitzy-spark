@@ -10,7 +10,7 @@
 
 ### AC1 — Input Validation (Checkpoint Active)
 
-```
+```gherkin
 Given a Structured Streaming query is running with checkpointing enabled (a checkpoint location is configured)
 When the data platform administrator opens the Structured Streaming tab in the Spark Web UI
 Then the UI displays a checkpoint status panel showing the checkpoint location path, the last successfully committed batch ID, and the timestamp of the last successful commit in ISO8601 UTC format
@@ -21,7 +21,7 @@ Then the UI displays a checkpoint status panel showing the checkpoint location p
 
 ### AC2 — Expected Output (Checkpoint Duration)
 
-```
+```gherkin
 Given a Structured Streaming query has completed at least 5 micro-batches with checkpointing
 When the data platform administrator views the checkpoint status panel
 Then the checkpoint duration is displayed as the time in milliseconds between the offset log write and the commit log write for the most recent batch
@@ -32,7 +32,7 @@ And a trend chart shows checkpoint duration values for the last 100 batches
 
 ### AC3 — Checkpoint Failure Count
 
-```
+```gherkin
 Given a Structured Streaming query has experienced checkpoint write failures (e.g., HDFS unavailability, permission errors)
 When the data platform administrator views the checkpoint status panel
 Then the cumulative failure count is displayed as an integer
@@ -43,7 +43,7 @@ And each failure is logged with its batch ID, error type, and timestamp in an ex
 
 ### AC4 — Checkpoint Storage Size
 
-```
+```gherkin
 Given a Structured Streaming query has been running with checkpointing for at least 10 batches
 When the data platform administrator views the checkpoint status panel
 Then the total checkpoint storage size is displayed in human-readable format (KB, MB, GB) calculated from the checkpoint directory size on the configured filesystem
@@ -54,7 +54,7 @@ And the size includes offset log files, commit log files, state store checkpoint
 
 ### AC5 — Error Handling (No Checkpoint Configured)
 
-```
+```gherkin
 Given a Structured Streaming query is running without a checkpoint location (memory sink or testing mode)
 When the data platform administrator views the Structured Streaming tab
 Then the checkpoint status panel displays "Checkpointing Not Configured" as a text label
@@ -65,7 +65,7 @@ And no checkpoint metrics, charts, or failure history sections are rendered for 
 
 ### AC6 — REST API Exposure
 
-```
+```gherkin
 Given a Structured Streaming query is running with checkpointing enabled
 When the data platform administrator queries the REST API endpoint /api/v1/applications/[app-id]/streaming/statistics
 Then the JSON response includes a "checkpoint" object with fields: lastCommittedBatchId (Long), lastCommitTimestamp (ISO8601 string), checkpointDurationMs (Long), failureCount (Integer), and checkpointSizeBytes (Long)
@@ -76,7 +76,7 @@ Then the JSON response includes a "checkpoint" object with fields: lastCommitted
 
 ### AC7 — Edge Case (Async Progress Tracking)
 
-```
+```gherkin
 Given a Structured Streaming query is running with async progress tracking enabled (spark.sql.streaming.asyncProgressTracking.enabled=true)
 When the data platform administrator views the checkpoint status panel
 Then the checkpoint duration reflects the async commit timing (AsyncOffsetSeqLog and AsyncCommitLog write times)
