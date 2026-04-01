@@ -8,13 +8,13 @@ The feature scope encompasses five capabilities: (1) capturing and persisting bo
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|----------|-----------|-------------|------|
-| STORY-001-01-01 | Capture Query Execution Plans | Capture and persist logical and physical execution plans for SQL queries | [STORY-001-01-01-capture-query-execution-plans](./FEATURE-001-01/STORY-001-01-01-capture-query-execution-plans.md) |
-| STORY-001-01-02 | Visualize Stage Execution Timeline | Display a timeline view of query stage execution with per-stage duration and metrics | [STORY-001-01-02-visualize-stage-execution-timeline](./FEATURE-001-01/STORY-001-01-02-visualize-stage-execution-timeline.md) |
-| STORY-001-01-03 | Display Resource Utilization Metrics | Show executor CPU and memory utilization metrics for each query execution | [STORY-001-01-03-display-resource-utilization-metrics](./FEATURE-001-01/STORY-001-01-03-display-resource-utilization-metrics.md) |
-| STORY-001-01-04 | Export Profiling Reports | Export query profiling data in JSON and CSV formats for external analysis | [STORY-001-01-04-export-profiling-reports](./FEATURE-001-01/STORY-001-01-04-export-profiling-reports.md) |
-| STORY-001-01-05 | Compare Execution Plans | Provide side-by-side comparison of query execution plans to identify optimization impacts | [STORY-001-01-05-compare-execution-plans](./FEATURE-001-01/STORY-001-01-05-compare-execution-plans.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|----------|-----------|-------|-------------|------|
+| STORY-001-01-01 | Capture Query Execution Plans | Backend | Capture and persist logical and physical execution plans for SQL queries | [STORY-001-01-01-capture-query-execution-plans](./FEATURE-001-01/STORY-001-01-01-capture-query-execution-plans.md) |
+| STORY-001-01-02 | Visualize Stage Execution Timeline | Frontend | Display a timeline view of query stage execution with per-stage duration and metrics | [STORY-001-01-02-visualize-stage-execution-timeline](./FEATURE-001-01/STORY-001-01-02-visualize-stage-execution-timeline.md) |
+| STORY-001-01-03 | Display Resource Utilization Metrics | Frontend | Show executor CPU and memory utilization metrics for each query execution | [STORY-001-01-03-display-resource-utilization-metrics](./FEATURE-001-01/STORY-001-01-03-display-resource-utilization-metrics.md) |
+| STORY-001-01-04 | Export Profiling Reports | Backend | Export query profiling data in JSON and CSV formats for external analysis | [STORY-001-01-04-export-profiling-reports](./FEATURE-001-01/STORY-001-01-04-export-profiling-reports.md) |
+| STORY-001-01-05 | Compare Execution Plans | Frontend | Provide side-by-side comparison of query execution plans to identify optimization impacts | [STORY-001-01-05-compare-execution-plans](./FEATURE-001-01/STORY-001-01-05-compare-execution-plans.md) |
 
 ## Dependencies
 

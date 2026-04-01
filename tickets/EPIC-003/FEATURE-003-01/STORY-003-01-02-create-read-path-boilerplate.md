@@ -1,5 +1,11 @@
 # Generate Read Path Boilerplate Code to Provide DataSource V2 File-Based Connector Read Foundation
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** platform engineer, **I want to** run the scaffolding generator and receive five generated Scala source files implementing the DataSource V2 read path — (1) a DataSourceV2 class extending `FileDataSourceV2` with `fallbackFileFormat`, `shortName()`, and `getTable` methods, (2) a Table case class extending `FileTable` with `newScanBuilder` and `inferSchema` methods, (3) a ScanBuilder case class extending `FileScanBuilder` with `build()` and `pushDataFilters` methods, (4) a Scan case class extending `FileScan` with `isSplitable` and `createReaderFactory` methods, and (5) a PartitionReaderFactory case class extending `FilePartitionReaderFactory` with a `buildReader` method stub, **so that** the connector has a complete, compilable read pipeline foundation that follows the established Spark DataSource V2 contract, reducing read path implementation effort from 3–5 days of API discovery to under 4 hours of format-specific logic implementation.

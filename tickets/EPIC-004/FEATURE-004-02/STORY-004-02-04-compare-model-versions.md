@@ -1,5 +1,11 @@
 # Compare Model Versions Side-by-Side to Identify the Best-Performing Candidate for Promotion
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 **As a** data scientist, **I want to** compare evaluation metrics, hyperparameters, and training metadata across up to 5 registered model versions of the same model in a side-by-side tabular view — including metrics from BinaryClassificationEvaluator (areaUnderROC, areaUnderPR), RegressionEvaluator (rmse, mse, r2, mae, var), MulticlassClassificationEvaluator (f1, accuracy, weightedPrecision, weightedRecall, logLoss), and ClusteringEvaluator (silhouette), along with all Estimator ParamMap values, **so that** I can make data-driven promotion decisions by objectively identifying which model version delivers the best performance on target evaluation metrics — reducing model selection time from hours of manual comparison across notebook outputs to under 2 minutes per comparison request.

@@ -1,5 +1,11 @@
 # Record Evaluation Metrics from Evaluator Results to Track Model Performance Across Training Runs
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data scientist, **I want to** automatically capture and persist evaluation metric results — including the metric name, metric value, evaluator class name, evaluator UID, isLargerBetter flag, and evaluator-specific parameters — each time an `Evaluator.evaluate()` call completes, associating each metric record with its corresponding experiment run, **so that** I can maintain a complete, auditable record of model performance across all training runs without manual logging, enabling objective comparison of model quality and identification of performance regressions — reducing metric tracking effort from manual spreadsheet maintenance to zero-touch automated capture.

@@ -1,5 +1,11 @@
 # Search and Filter Historical Experiment Metadata to Enable Data-Driven Model Selection
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data scientist, **I want to** search and filter historical experiment metadata by time range, tag values, metric thresholds, and pipeline type through a programmatic query API, **so that** I can identify the best-performing model configurations from past training runs and make data-driven decisions about which experiments to reproduce, refine, or promote to production — reducing experiment selection time from hours of manual log review to seconds of structured queries.

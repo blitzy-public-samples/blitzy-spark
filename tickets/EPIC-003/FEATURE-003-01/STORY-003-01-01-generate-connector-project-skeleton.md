@@ -1,5 +1,11 @@
 # Generate Connector Project Skeleton to Bootstrap Maven-Based DataSource V2 Connector Modules
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** platform engineer, **I want to** run the scaffolding generator with a connector name and base package and receive a complete Maven project directory containing: (1) a `pom.xml` with parent reference to `org.apache.spark:spark-parent_2.13:4.1.0-SNAPSHOT` (`relativePath` set to `../../pom.xml`), a `spark-sql_${scala.binary.version}` dependency in provided scope, test-jar dependencies for `spark-core_${scala.binary.version}`, `spark-catalyst_${scala.binary.version}`, and `spark-sql_${scala.binary.version}` in test scope, output directories set to `target/scala-${scala.binary.version}/classes` and `target/scala-${scala.binary.version}/test-classes`, and an `sbt.project.name` property set to the connector name; (2) a standard directory layout including `src/main/scala/<package-path>/`, `src/test/scala/<package-path>/`, `src/main/resources/META-INF/services/`, and a `README.md` file, **so that** the connector project is immediately compilable with `mvn compile` and structurally identical to existing Spark connectors (Avro, Protobuf), eliminating 2–3 days of initial project setup and Maven POM configuration trial-and-error.

@@ -1,5 +1,11 @@
 # Generate DataSource V2 Service Registration to Enable Short-Name Connector Discovery in Spark SQL
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** platform engineer, **I want to** run the scaffolding generator and receive a `META-INF/services/org.apache.spark.sql.sources.DataSourceRegister` file populated with the fully qualified class name of the generated DataSourceV2 class, along with a `shortName()` method override in the DataSourceV2 class returning the connector's registered short name, **so that** the connector is discoverable by Spark SQL's service loader mechanism, allowing end-users to reference the connector using `spark.read.format("<shortName>")` instead of the fully qualified class name, matching the registration pattern used by built-in connectors like Avro where `shortName()` returns `"avro"`.

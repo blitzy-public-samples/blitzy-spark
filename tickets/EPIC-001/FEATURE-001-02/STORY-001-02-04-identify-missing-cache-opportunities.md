@@ -1,5 +1,11 @@
 # Identify Missing Cache Opportunities for Repeatedly Computed Datasets to Eliminate Redundant Processing
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data scientist, **I want to** receive automated caching recommendations that identify DataFrames or tables computed more than once within the current SparkSession, including the estimated memory footprint for caching, the number of redundant computations detected, and the specific `dataFrame.cache()` or `spark.catalog.cacheTable()` API call to apply, **so that** I can avoid unknowingly recomputing expensive transformations (such as joins, aggregations, or ML feature pipelines) that can consume 30–60% of total query runtime in iterative workloads, enabling me to cache strategic datasets and reduce end-to-end notebook execution time by 2–5x for iterative exploration patterns.

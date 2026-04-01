@@ -1,5 +1,11 @@
 # Generate Quality Score Dashboard in Spark Web UI to Visualize Data Quality Status Across DataFrames
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 As a **data platform administrator**, I want to view a dedicated Data Quality tab in the Spark Web UI that displays per-DataFrame quality scores with color-coded indicators (green for scores at or above the configured threshold, red for scores below the threshold), so that I can monitor data quality status across all active and completed DataFrames in a single centralized view without switching to external tools, reducing mean time to detect data quality degradation from hours to minutes.

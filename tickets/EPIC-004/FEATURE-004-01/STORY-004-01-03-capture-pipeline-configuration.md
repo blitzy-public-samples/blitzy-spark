@@ -1,5 +1,11 @@
 # Capture Complete Pipeline Stage Configuration as Serialized JSON to Enable Experiment Reproducibility
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** ML engineer, **I want to** automatically snapshot and persist the complete pipeline configuration — including all PipelineStage instances, their class names, UIDs, and full parameter maps — as a serialized JSON document each time `Pipeline.fit()` executes, **so that** I can maintain a precise, machine-readable record of the exact pipeline structure and configuration used for each training run, enabling reproduction of any historical experiment by reconstructing the identical pipeline from the stored JSON without relying on version control archaeology or manual documentation — reducing experiment reproduction setup time from hours to minutes.

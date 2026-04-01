@@ -1,5 +1,11 @@
 # Archive Deprecated Model Versions to Maintain a Clean and Manageable Registry
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data platform administrator, **I want to** mark model versions as deprecated and archive them from the active registry, so they no longer appear in active listings or promotion workflows, while the underlying model artifacts remain in persistent storage for audit and rollback purposes, **so that** I can reduce clutter in the active model registry, prevent accidental promotion of outdated models, and maintain compliance with data governance retention policies — reducing active registry size by removing stale entries and cutting registry query response times for active model lookups by up to 40%.

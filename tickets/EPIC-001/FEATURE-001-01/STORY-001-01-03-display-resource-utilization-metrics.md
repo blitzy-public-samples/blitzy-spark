@@ -1,5 +1,11 @@
 # Display Executor CPU and Memory Utilization Metrics per Query in the Spark Web UI
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 **As a** platform engineer,

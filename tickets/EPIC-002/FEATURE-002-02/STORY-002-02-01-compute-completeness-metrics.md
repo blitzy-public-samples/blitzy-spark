@@ -1,5 +1,11 @@
 # Compute Data Completeness Metrics on Validated DataFrames to Quantify Column-Level Data Quality
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 As a **data analyst**, I want to compute completeness metrics — including non-null ratio, distinct value count, and null count — for each column in a validated DataFrame, so that I can quantify data quality at the column level across pipeline outputs and identify columns with missing or sparse data before they impact downstream reporting accuracy, reducing data quality investigation time by up to 40%.

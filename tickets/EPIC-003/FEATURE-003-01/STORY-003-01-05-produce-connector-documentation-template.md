@@ -1,5 +1,11 @@
 # Generate Connector Documentation Template to Standardize Data Source Usage Guides
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 **As a** platform engineer, **I want to** run the scaffolding generator and receive a pre-populated README.md documentation template that includes sections for deploying the connector (`--packages` instructions), a configuration options table, read and write API examples in Scala, Python, and SQL, and supported type conversion tables, **so that** connector documentation follows a consistent structure across all custom connectors, reducing documentation authoring time by 70% and ensuring end-users can onboard to any custom connector with a familiar guide format.

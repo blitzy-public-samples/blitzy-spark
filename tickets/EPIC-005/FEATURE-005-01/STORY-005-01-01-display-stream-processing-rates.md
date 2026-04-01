@@ -1,5 +1,11 @@
 # Display Stream Processing Rates to Enable Real-Time Throughput Monitoring for Structured Streaming Queries
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 **As a** streaming application developer,

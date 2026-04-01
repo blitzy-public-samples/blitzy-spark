@@ -1,5 +1,11 @@
 # Generate Write Path Boilerplate Code to Accelerate Custom Connector Data Output Implementation
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** platform engineer, **I want to** run the scaffolding generator and receive generated write path source files containing: (1) a Write case class extending `FileWrite` with a `prepareWrite` method stub that accepts `SQLConf`, `Job`, `options Map`, and `dataSchema StructType` and returns an `OutputWriterFactory`, (2) a `newWriteBuilder` method added to the Table class that creates a `WriteBuilder` returning the Write instance, and (3) an `OutputWriterFactory` stub class with a `newInstance` method placeholder, **so that** the connector has a compilable write path foundation that follows the established Spark DataSource V2 write contract, reducing write path implementation time from days to hours by eliminating the need to manually discover and implement the FileWrite → OutputWriterFactory → OutputWriter class hierarchy.

@@ -6,13 +6,13 @@ Data platform teams lack visibility into data quality trends across pipeline exe
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|----------|-----------|-------------|------|
-| STORY-002-02-01 | Compute Completeness Metrics | Compute non-null ratio, distinct value count, and null count for each column in a validated DataFrame, returning results as a structured summary DataFrame | [STORY-002-02-01-compute-completeness-metrics.md](./FEATURE-002-02/STORY-002-02-01-compute-completeness-metrics.md) |
-| STORY-002-02-02 | Generate Quality Score Dashboard | Render a dedicated quality score tab in the Spark Web UI displaying per-DataFrame quality scores with color-coded pass/fail indicators and drill-down to individual rule violations | [STORY-002-02-02-generate-quality-score-dashboard.md](./FEATURE-002-02/STORY-002-02-02-generate-quality-score-dashboard.md) |
-| STORY-002-02-03 | Track Quality Trends Over Time | Persist quality metric snapshots in the AppStatusStore (KVStore) after each pipeline execution and provide a query API to retrieve historical trends for the last N runs | [STORY-002-02-03-track-quality-trends-over-time.md](./FEATURE-002-02/STORY-002-02-03-track-quality-trends-over-time.md) |
-| STORY-002-02-04 | Export Quality Reports | Export quality validation results and metric summaries in JSON and CSV formats via a programmatic DataFrame API and a REST API endpoint under `/api/v1/quality/reports` | [STORY-002-02-04-export-quality-reports.md](./FEATURE-002-02/STORY-002-02-04-export-quality-reports.md) |
-| STORY-002-02-05 | Configure Quality Alerting Thresholds | Define per-rule and per-DataFrame quality score thresholds that trigger metric gauge updates exposed to all configured Dropwizard sinks when scores fall below the defined limits | [STORY-002-02-05-configure-quality-alerting-thresholds.md](./FEATURE-002-02/STORY-002-02-05-configure-quality-alerting-thresholds.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|----------|-----------|-------|-------------|------|
+| STORY-002-02-01 | Compute Completeness Metrics | Backend | Compute non-null ratio, distinct value count, and null count for each column in a validated DataFrame, returning results as a structured summary DataFrame | [STORY-002-02-01-compute-completeness-metrics.md](./FEATURE-002-02/STORY-002-02-01-compute-completeness-metrics.md) |
+| STORY-002-02-02 | Generate Quality Score Dashboard | Frontend | Render a dedicated quality score tab in the Spark Web UI displaying per-DataFrame quality scores with color-coded pass/fail indicators and drill-down to individual rule violations | [STORY-002-02-02-generate-quality-score-dashboard.md](./FEATURE-002-02/STORY-002-02-02-generate-quality-score-dashboard.md) |
+| STORY-002-02-03 | Track Quality Trends Over Time | Backend | Persist quality metric snapshots in the AppStatusStore (KVStore) after each pipeline execution and provide a query API to retrieve historical trends for the last N runs | [STORY-002-02-03-track-quality-trends-over-time.md](./FEATURE-002-02/STORY-002-02-03-track-quality-trends-over-time.md) |
+| STORY-002-02-04 | Export Quality Reports | Frontend | Export quality validation results and metric summaries in JSON and CSV formats via a programmatic DataFrame API and a REST API endpoint under `/api/v1/quality/reports` | [STORY-002-02-04-export-quality-reports.md](./FEATURE-002-02/STORY-002-02-04-export-quality-reports.md) |
+| STORY-002-02-05 | Configure Quality Alerting Thresholds | Backend | Define per-rule and per-DataFrame quality score thresholds that trigger metric gauge updates exposed to all configured Dropwizard sinks when scores fall below the defined limits | [STORY-002-02-05-configure-quality-alerting-thresholds.md](./FEATURE-002-02/STORY-002-02-05-configure-quality-alerting-thresholds.md) |
 
 ## Dependencies
 

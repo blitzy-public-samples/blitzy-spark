@@ -1,5 +1,11 @@
 # Add Custom Tags and Annotations to Experiment Runs to Organize and Contextualize Training History
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data scientist, **I want to** add, update, and remove custom key-value tags and free-text annotations to any experiment run through a programmatic API, both during and after pipeline execution, **so that** I can organize experiment runs by project, dataset version, hypothesis, or team membership using structured tags, and attach human-readable notes explaining experimental rationale or observations — enabling structured categorization of thousands of experiments and reducing time spent searching for specific runs by 80% compared to untagged experiment logs.

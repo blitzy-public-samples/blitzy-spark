@@ -1,5 +1,11 @@
 # Generate Optimization Summary Report Consolidating All Query Performance Recommendations
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 **As a** data engineer, **I want to** generate a consolidated optimization summary report for a specific SQL query execution (or for all queries in a session) that aggregates all detected issues and recommendations — including data skew patterns, join strategy changes, partition optimization suggestions, and cache opportunities — into a single structured report with severity rankings, estimated performance impact percentages, and prioritized actionable steps, **so that** I obtain a single-view performance improvement plan instead of reviewing multiple individual analyses, reducing the optimization review process from examining 4 separate recommendation categories to a single prioritized action list, and enabling team-wide sharing of optimization findings through exportable JSON and CSV formats.

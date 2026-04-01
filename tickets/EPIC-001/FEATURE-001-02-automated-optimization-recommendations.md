@@ -10,13 +10,13 @@ This feature extends the Catalyst optimizer's Adaptive Query Execution (AQE) fra
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|----------|-----------|-------------|------|
-| STORY-001-02-01 | Detect Data Skew Patterns | Identify and report partition-level data skew in shuffle operations during query execution | [STORY-001-02-01-detect-data-skew-patterns](./FEATURE-001-02/STORY-001-02-01-detect-data-skew-patterns.md) |
-| STORY-001-02-02 | Recommend Join Strategy Changes | Analyze join operations and recommend optimal join strategies based on runtime data sizes | [STORY-001-02-02-recommend-join-strategy-changes](./FEATURE-001-02/STORY-001-02-02-recommend-join-strategy-changes.md) |
-| STORY-001-02-03 | Suggest Partition Optimization | Recommend optimal partition counts and repartitioning strategies based on data distribution | [STORY-001-02-03-suggest-partition-optimization](./FEATURE-001-02/STORY-001-02-03-suggest-partition-optimization.md) |
-| STORY-001-02-04 | Identify Missing Cache Opportunities | Detect repeatedly computed datasets and recommend caching to avoid redundant recomputation | [STORY-001-02-04-identify-missing-cache-opportunities](./FEATURE-001-02/STORY-001-02-04-identify-missing-cache-opportunities.md) |
-| STORY-001-02-05 | Generate Optimization Summary Report | Produce a consolidated report of all detected issues and recommendations for a query or session | [STORY-001-02-05-generate-optimization-summary-report](./FEATURE-001-02/STORY-001-02-05-generate-optimization-summary-report.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|----------|-----------|-------|-------------|------|
+| STORY-001-02-01 | Detect Data Skew Patterns | Backend | Identify and report partition-level data skew in shuffle operations during query execution | [STORY-001-02-01-detect-data-skew-patterns](./FEATURE-001-02/STORY-001-02-01-detect-data-skew-patterns.md) |
+| STORY-001-02-02 | Recommend Join Strategy Changes | Backend | Analyze join operations and recommend optimal join strategies based on runtime data sizes | [STORY-001-02-02-recommend-join-strategy-changes](./FEATURE-001-02/STORY-001-02-02-recommend-join-strategy-changes.md) |
+| STORY-001-02-03 | Suggest Partition Optimization | Backend | Recommend optimal partition counts and repartitioning strategies based on data distribution | [STORY-001-02-03-suggest-partition-optimization](./FEATURE-001-02/STORY-001-02-03-suggest-partition-optimization.md) |
+| STORY-001-02-04 | Identify Missing Cache Opportunities | Backend | Detect repeatedly computed datasets and recommend caching to avoid redundant recomputation | [STORY-001-02-04-identify-missing-cache-opportunities](./FEATURE-001-02/STORY-001-02-04-identify-missing-cache-opportunities.md) |
+| STORY-001-02-05 | Generate Optimization Summary Report | Frontend | Produce a consolidated report of all detected issues and recommendations for a query or session | [STORY-001-02-05-generate-optimization-summary-report](./FEATURE-001-02/STORY-001-02-05-generate-optimization-summary-report.md) |
 
 ## Dependencies
 

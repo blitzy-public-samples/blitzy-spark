@@ -1,5 +1,11 @@
 # Recommend Join Strategy Changes Based on Runtime Data Sizes to Reduce Shuffle and I/O Overhead
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data engineer, **I want to** receive automated join strategy recommendations that compare the current join strategy used for each join operation in a query against the optimal strategy determined from actual runtime data sizes, including specific join hint syntax to apply the recommended change, **so that** I can eliminate manual join strategy tuning that requires deep knowledge of Spark internals and data size estimation, reducing query optimization cycles from days to minutes and achieving 2-10x performance improvement for queries with suboptimal join strategies (e.g., SortMergeJoin used when data fits within the 10MB broadcast threshold).

@@ -6,13 +6,13 @@ Production streaming teams lack consolidated health visibility for Structured St
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|---|---|---|---|
-| STORY-005-01-01 | Display Stream Processing Rates | Surface input rows/sec and processing rows/sec metrics per streaming query in the Spark Web UI with per-batch values and rolling trend visualization | [STORY-005-01-01-display-stream-processing-rates.md](./FEATURE-005-01/STORY-005-01-01-display-stream-processing-rates.md) |
-| STORY-005-01-02 | Visualize Watermark Progression | Display current watermark value, advancement rate, and event-time gap per streaming query to help operators identify late-data and windowing issues | [STORY-005-01-02-visualize-watermark-progression.md](./FEATURE-005-01/STORY-005-01-02-visualize-watermark-progression.md) |
-| STORY-005-01-03 | Monitor State Store Size | Expose per-operator state store size metrics (number of keys, memory usage in bytes) with growth trend tracking and configurable size threshold alerts | [STORY-005-01-03-monitor-state-store-size.md](./FEATURE-005-01/STORY-005-01-03-monitor-state-store-size.md) |
-| STORY-005-01-04 | Detect Processing Lag | Compute and surface the difference between current wall-clock time and the event time of the most recently processed record, enabling operators to identify growing pipeline delays | [STORY-005-01-04-detect-processing-lag.md](./FEATURE-005-01/STORY-005-01-04-detect-processing-lag.md) |
-| STORY-005-01-05 | Show Checkpoint Status | Display last successful checkpoint timestamp, checkpoint duration, checkpoint size, and cumulative checkpoint failure count per streaming query | [STORY-005-01-05-show-checkpoint-status.md](./FEATURE-005-01/STORY-005-01-05-show-checkpoint-status.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|---|---|---|---|---|
+| STORY-005-01-01 | Display Stream Processing Rates | Frontend | Surface input rows/sec and processing rows/sec metrics per streaming query in the Spark Web UI with per-batch values and rolling trend visualization | [STORY-005-01-01-display-stream-processing-rates.md](./FEATURE-005-01/STORY-005-01-01-display-stream-processing-rates.md) |
+| STORY-005-01-02 | Visualize Watermark Progression | Frontend | Display current watermark value, advancement rate, and event-time gap per streaming query to help operators identify late-data and windowing issues | [STORY-005-01-02-visualize-watermark-progression.md](./FEATURE-005-01/STORY-005-01-02-visualize-watermark-progression.md) |
+| STORY-005-01-03 | Monitor State Store Size | Backend | Expose per-operator state store size metrics (number of keys, memory usage in bytes) with growth trend tracking and configurable size threshold alerts | [STORY-005-01-03-monitor-state-store-size.md](./FEATURE-005-01/STORY-005-01-03-monitor-state-store-size.md) |
+| STORY-005-01-04 | Detect Processing Lag | Backend | Compute and surface the difference between current wall-clock time and the event time of the most recently processed record, enabling operators to identify growing pipeline delays | [STORY-005-01-04-detect-processing-lag.md](./FEATURE-005-01/STORY-005-01-04-detect-processing-lag.md) |
+| STORY-005-01-05 | Show Checkpoint Status | Frontend | Display last successful checkpoint timestamp, checkpoint duration, checkpoint size, and cumulative checkpoint failure count per streaming query | [STORY-005-01-05-show-checkpoint-status.md](./FEATURE-005-01/STORY-005-01-05-show-checkpoint-status.md) |
 
 ## Dependencies
 

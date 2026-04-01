@@ -1,5 +1,11 @@
 # Suggest Partition Optimization Based on Data Volume and Distribution to Minimize Shuffle Overhead
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data engineer, **I want to** receive partition optimization recommendations that analyze the actual data volume and partition size distribution for each shuffle stage and suggest specific target partition counts, coalesce opportunities, and repartitioning strategies including the SQL or DataFrame API syntax to apply the change, **so that** I can replace manual trial-and-error partition tuning (repeatedly adjusting `spark.sql.shuffle.partitions` from its default of 200) with data-driven recommendations, reducing partition-related performance issues such as too-small partitions (excessive task scheduling overhead) or too-large partitions (memory pressure and spills) and achieving 20–50% runtime improvement for partition-misconfigured workloads.

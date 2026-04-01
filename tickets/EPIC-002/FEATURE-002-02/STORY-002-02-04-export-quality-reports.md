@@ -1,5 +1,11 @@
 # Export Data Quality Reports in JSON and CSV Formats to Enable Automated Quality Gate Integration
 
+## Implementation Phase
+
+**Phase:** Frontend
+
+This is a **Phase 2 (Frontend)** story. It must not begin development until all Phase 1 (Backend) stories in this epic have passed acceptance testing. Frontend stories consume data and APIs produced by backend stories.
+
 ## User Story
 
 As a **data engineer**, I want to export data quality reports in both JSON and CSV formats via a programmatic DataFrame API method and a REST API endpoint (`/api/v1/quality/reports`), so that I can integrate quality validation results into CI/CD pipelines, data cataloging tools, and stakeholder reporting workflows, eliminating manual report generation that consumes up to 2 hours per pipeline release cycle.

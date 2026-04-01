@@ -1,5 +1,11 @@
 # Detect Backpressure Conditions to Enable Proactive Stream Processing Bottleneck Identification
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** DevOps engineer monitoring production Structured Streaming pipelines,

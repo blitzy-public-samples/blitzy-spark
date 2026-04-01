@@ -1,5 +1,11 @@
 # Log Estimator Hyperparameters Per Training Run to Enable Automated Experiment Tracking
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** ML engineer, **I want to** automatically capture and persist all Estimator hyperparameter values from the ParamMap — including both explicitly set parameters and default values — each time `Pipeline.fit()` or `Estimator.fit()` executes, creating a unique experiment run record with a generated run ID and timestamp, **so that** I can maintain a complete, version-controlled record of every hyperparameter configuration used across training runs without manual logging effort, enabling precise comparison of parameter changes between runs and exact reproduction of any historical training configuration — eliminating the need for external experiment tracking tools for hyperparameter management.

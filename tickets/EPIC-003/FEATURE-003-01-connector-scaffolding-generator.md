@@ -6,13 +6,13 @@ Platform engineers and connector developers spend weeks understanding Spark Data
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|---|---|---|---|
-| STORY-003-01-01 | Generate Connector Project Skeleton | Generates a complete Maven/SBT project directory structure with POM configuration, Scala source layout, test layout, and resource directories matching existing connector modules | [STORY-003-01-01-generate-connector-project-skeleton.md](./FEATURE-003-01/STORY-003-01-01-generate-connector-project-skeleton.md) |
-| STORY-003-01-02 | Create Read Path Boilerplate | Produces DataSource V2 read-side classes extending `FileDataSourceV2`, `FileTable`, and `FileScanBuilder` with stub schema inference and partition reader logic | [STORY-003-01-02-create-read-path-boilerplate.md](./FEATURE-003-01/STORY-003-01-02-create-read-path-boilerplate.md) |
-| STORY-003-01-03 | Create Write Path Boilerplate | Produces DataSource V2 write-side classes extending `FileWrite` with `OutputWriterFactory` implementation and configurable save mode support | [STORY-003-01-03-create-write-path-boilerplate.md](./FEATURE-003-01/STORY-003-01-03-create-write-path-boilerplate.md) |
-| STORY-003-01-04 | Generate DataSource V2 Registration | Creates the `META-INF/services` registration file and `DataSourceRegister` implementation class with a configurable connector short name | [STORY-003-01-04-generate-datasource-v2-registration.md](./FEATURE-003-01/STORY-003-01-04-generate-datasource-v2-registration.md) |
-| STORY-003-01-05 | Produce Connector Documentation Template | Generates a structured README and data source documentation template following the style of existing Spark data source guides with deployment, configuration, and type conversion sections | [STORY-003-01-05-produce-connector-documentation-template.md](./FEATURE-003-01/STORY-003-01-05-produce-connector-documentation-template.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|---|---|---|---|---|
+| STORY-003-01-01 | Generate Connector Project Skeleton | Backend | Generates a complete Maven/SBT project directory structure with POM configuration, Scala source layout, test layout, and resource directories matching existing connector modules | [STORY-003-01-01-generate-connector-project-skeleton.md](./FEATURE-003-01/STORY-003-01-01-generate-connector-project-skeleton.md) |
+| STORY-003-01-02 | Create Read Path Boilerplate | Backend | Produces DataSource V2 read-side classes extending `FileDataSourceV2`, `FileTable`, and `FileScanBuilder` with stub schema inference and partition reader logic | [STORY-003-01-02-create-read-path-boilerplate.md](./FEATURE-003-01/STORY-003-01-02-create-read-path-boilerplate.md) |
+| STORY-003-01-03 | Create Write Path Boilerplate | Backend | Produces DataSource V2 write-side classes extending `FileWrite` with `OutputWriterFactory` implementation and configurable save mode support | [STORY-003-01-03-create-write-path-boilerplate.md](./FEATURE-003-01/STORY-003-01-03-create-write-path-boilerplate.md) |
+| STORY-003-01-04 | Generate DataSource V2 Registration | Backend | Creates the `META-INF/services` registration file and `DataSourceRegister` implementation class with a configurable connector short name | [STORY-003-01-04-generate-datasource-v2-registration.md](./FEATURE-003-01/STORY-003-01-04-generate-datasource-v2-registration.md) |
+| STORY-003-01-05 | Produce Connector Documentation Template | Frontend | Generates a structured README and data source documentation template following the style of existing Spark data source guides with deployment, configuration, and type conversion sections | [STORY-003-01-05-produce-connector-documentation-template.md](./FEATURE-003-01/STORY-003-01-05-produce-connector-documentation-template.md) |
 
 ## Dependencies
 

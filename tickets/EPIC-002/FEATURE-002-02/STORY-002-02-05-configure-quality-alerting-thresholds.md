@@ -1,5 +1,11 @@
 # Configure Quality Alerting Thresholds with Dropwizard Metrics Integration to Enable Proactive Data Quality Monitoring
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 As a **data platform administrator**, I want to configure quality alerting thresholds per rule and per DataFrame (via `spark.quality.alert.threshold.*` properties), with threshold violations triggering metric gauge updates exposed through all configured Dropwizard sinks (Prometheus, JMX, Graphite, StatsD, Console, CSV, Slf4j), so that I can receive proactive alerts through existing monitoring infrastructure (Grafana/Prometheus, Datadog, PagerDuty) when data quality drops below defined thresholds, reducing mean time to respond to quality incidents from 4 hours to under 15 minutes.

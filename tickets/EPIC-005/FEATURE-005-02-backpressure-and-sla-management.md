@@ -6,13 +6,13 @@ Production Structured Streaming workloads lack built-in backpressure detection a
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|---|---|---|---|
-| STORY-005-02-01 | Detect Backpressure Conditions | Automatically identify when a streaming query experiences backpressure by analyzing processing-time-to-trigger-interval ratios and input-rate-to-processing-rate comparisons across consecutive micro-batches | [STORY-005-02-01-detect-backpressure-conditions.md](./FEATURE-005-02/STORY-005-02-01-detect-backpressure-conditions.md) |
-| STORY-005-02-02 | Configure Processing SLA Targets | Enable per-query configuration of maximum processing latency and minimum throughput SLA targets through SparkConf properties | [STORY-005-02-02-configure-processing-sla-targets.md](./FEATURE-005-02/STORY-005-02-02-configure-processing-sla-targets.md) |
-| STORY-005-02-03 | Alert on SLA Breaches | Publish structured SLA breach alerts as Dropwizard gauge metrics and emit them through all configured metric sinks when observed performance violates defined targets | [STORY-005-02-03-alert-on-sla-breaches.md](./FEATURE-005-02/STORY-005-02-03-alert-on-sla-breaches.md) |
-| STORY-005-02-04 | Recommend Resource Scaling | Generate actionable resource scaling recommendations including executor count and memory allocation suggestions based on historical processing patterns and sustained performance degradation | [STORY-005-02-04-recommend-resource-scaling.md](./FEATURE-005-02/STORY-005-02-04-recommend-resource-scaling.md) |
-| STORY-005-02-05 | Generate Observability Reports | Produce structured observability reports in JSON and CSV formats via the REST API, consolidating backpressure events, SLA compliance metrics, and resource utilization summaries | [STORY-005-02-05-generate-observability-reports.md](./FEATURE-005-02/STORY-005-02-05-generate-observability-reports.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|---|---|---|---|---|
+| STORY-005-02-01 | Detect Backpressure Conditions | Backend | Automatically identify when a streaming query experiences backpressure by analyzing processing-time-to-trigger-interval ratios and input-rate-to-processing-rate comparisons across consecutive micro-batches | [STORY-005-02-01-detect-backpressure-conditions.md](./FEATURE-005-02/STORY-005-02-01-detect-backpressure-conditions.md) |
+| STORY-005-02-02 | Configure Processing SLA Targets | Backend | Enable per-query configuration of maximum processing latency and minimum throughput SLA targets through SparkConf properties | [STORY-005-02-02-configure-processing-sla-targets.md](./FEATURE-005-02/STORY-005-02-02-configure-processing-sla-targets.md) |
+| STORY-005-02-03 | Alert on SLA Breaches | Backend | Publish structured SLA breach alerts as Dropwizard gauge metrics and emit them through all configured metric sinks when observed performance violates defined targets | [STORY-005-02-03-alert-on-sla-breaches.md](./FEATURE-005-02/STORY-005-02-03-alert-on-sla-breaches.md) |
+| STORY-005-02-04 | Recommend Resource Scaling | Backend | Generate actionable resource scaling recommendations including executor count and memory allocation suggestions based on historical processing patterns and sustained performance degradation | [STORY-005-02-04-recommend-resource-scaling.md](./FEATURE-005-02/STORY-005-02-04-recommend-resource-scaling.md) |
+| STORY-005-02-05 | Generate Observability Reports | Frontend | Produce structured observability reports in JSON and CSV formats via the REST API, consolidating backpressure events, SLA compliance metrics, and resource utilization summaries | [STORY-005-02-05-generate-observability-reports.md](./FEATURE-005-02/STORY-005-02-05-generate-observability-reports.md) |
 
 ## Dependencies
 

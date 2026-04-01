@@ -1,5 +1,11 @@
 # Promote Model Versions Across Lifecycle Stages to Govern the Path from Development to Production
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data platform administrator, **I want to** move registered model versions through three defined lifecycle stages — Development, Staging, and Production — with each transition recorded as an immutable audit trail entry in the KVStore-backed registry, including the administrator identity, transition timestamp, source stage, target stage, and optional justification note, **so that** I can enforce a governed model deployment workflow that prevents untested models from reaching production, provide traceability for regulatory compliance, and ensure only one model version occupies each stage per model at a time — eliminating manual deployment tracking spreadsheets and reducing model deployment errors by enforcing stage-gate transitions.

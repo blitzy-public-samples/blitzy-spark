@@ -1,5 +1,11 @@
 # Configure Rule Severity Levels for Quality Validation Rules to Control Pipeline Behavior on Data Quality Violations
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As a** data platform administrator,
@@ -92,13 +98,13 @@ A quality rule with severity set to ERROR is executed against an empty DataFrame
 
 A quality rule is configured with severity set to `null` programmatically. The system raises an `IllegalArgumentException` with a message indicating that severity must be one of ERROR, WARNING, or INFO.
 
-### EC-3: All Rules Pass — No Side Effects
+### EC-3: Boundary Value — Maximum Number of Severity-Configured Rules
 
-A set of 10 rules with mixed severity levels (ERROR, WARNING, INFO) is executed against a DataFrame where all rows conform to all rules. No exceptions are raised, no warnings are logged, and all validation results report `status=PASS`.
+A validation job configures 1,000 quality rules each with explicit severity levels (a mix of ERROR, WARNING, and INFO). All 1,000 rules execute against a 10-row DataFrame without stack overflow, memory exhaustion, or configuration parsing failure. The validation result contains exactly 1,000 individual rule results, each with its correct severity level preserved.
 
-### EC-4: Case-Insensitive Severity Configuration
+### EC-4: Invalid Severity String — Rejected with Descriptive Error Message
 
-A quality rule severity is configured as `"error"` (lowercase) via Spark configuration property. The system accepts case-insensitive severity values and interprets `"error"` as ERROR.
+A quality rule is configured with severity set to `"CRITICAL"` — a string that is not one of the three valid severity levels (ERROR, WARNING, INFO). The system raises an `IllegalArgumentException` at configuration time with a message listing the valid severity options, preventing pipeline execution with an unrecognized severity level.
 
 ### EC-5: All ERROR Rules Fail Simultaneously
 

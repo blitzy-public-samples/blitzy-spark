@@ -1,5 +1,11 @@
 # Track Data Quality Trends Across Pipeline Executions to Detect Gradual Data Degradation Over Time
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 As a **data engineer**, I want to track and query historical quality metric trends across pipeline executions, persisted in the AppStatusStore using the KVStore backend, so that I can identify gradual data degradation patterns — such as a column's non-null ratio declining from 0.98 to 0.85 over 20 pipeline runs — before they breach alerting thresholds, reducing unplanned pipeline failures by up to 30%.

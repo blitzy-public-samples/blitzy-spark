@@ -1,5 +1,11 @@
 # Version Registered Models with Semantic Versioning and Data Lineage to Enable Reproducible ML Workflows
 
+## Implementation Phase
+
+**Phase:** Backend
+
+This is a **Phase 1 (Backend)** story. It must be implemented and fully tested before any Phase 2 (Frontend) stories in this epic begin development. Backend stories establish data capture, analysis algorithms, persistence, and API layers that frontend stories depend on.
+
 ## User Story
 
 **As an** ML engineer, **I want to** assign semantic version numbers (major.minor.patch) to registered model entries in the model registry, with each version recording complete lineage metadata including: the training dataset identifier, the pipeline configuration hash derived from the PipelineStage array and each stage's ParamMap (serialized via `Param.jsonEncode`), the parent Estimator reference from `Model.parent`, the experiment run ID (from FEATURE-004-01), the Spark version from DefaultParamsWriter metadata, and a creation timestamp — with automatic minor version increment when no explicit version is provided, **so that** I can guarantee full reproducibility of any trained model version by capturing exactly which data, code, parameters, and environment produced it — reducing model debugging and reproduction time from days to minutes by providing complete lineage traceability for every registered model version.

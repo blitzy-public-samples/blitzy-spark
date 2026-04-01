@@ -6,13 +6,13 @@ ML engineers and data scientists currently lack built-in mechanisms to track exp
 
 ## User Stories Index
 
-| Story ID | Story Name | Description | Link |
-|----------|-----------|-------------|------|
-| STORY-004-01-01 | Log Hyperparameters Per Run | Capture and persist hyperparameter values from Estimator ParamMap for each training run | [STORY-004-01-01](./FEATURE-004-01/STORY-004-01-01-log-hyperparameters-per-run.md) |
-| STORY-004-01-02 | Record Evaluation Metrics | Log evaluation metric results from all Evaluator types with model and run association | [STORY-004-01-02](./FEATURE-004-01/STORY-004-01-02-record-evaluation-metrics.md) |
-| STORY-004-01-03 | Capture Pipeline Configuration | Snapshot the complete pipeline stage configuration including all PipelineStage parameters as JSON | [STORY-004-01-03](./FEATURE-004-01/STORY-004-01-03-capture-pipeline-configuration.md) |
-| STORY-004-01-04 | Tag and Annotate Experiments | Add custom key-value tags and free-text annotations to experiment runs via programmatic API | [STORY-004-01-04](./FEATURE-004-01/STORY-004-01-04-tag-and-annotate-experiments.md) |
-| STORY-004-01-05 | Query Experiment History | Search and filter historical experiment metadata by time range, tag, metric threshold, and pipeline type | [STORY-004-01-05](./FEATURE-004-01/STORY-004-01-05-query-experiment-history.md) |
+| Story ID | Story Name | Phase | Description | Link |
+|----------|-----------|-------|-------------|------|
+| STORY-004-01-01 | Log Hyperparameters Per Run | Backend | Capture and persist hyperparameter values from Estimator ParamMap for each training run | [STORY-004-01-01](./FEATURE-004-01/STORY-004-01-01-log-hyperparameters-per-run.md) |
+| STORY-004-01-02 | Record Evaluation Metrics | Backend | Log evaluation metric results from all Evaluator types with model and run association | [STORY-004-01-02](./FEATURE-004-01/STORY-004-01-02-record-evaluation-metrics.md) |
+| STORY-004-01-03 | Capture Pipeline Configuration | Backend | Snapshot the complete pipeline stage configuration including all PipelineStage parameters as JSON | [STORY-004-01-03](./FEATURE-004-01/STORY-004-01-03-capture-pipeline-configuration.md) |
+| STORY-004-01-04 | Tag and Annotate Experiments | Backend | Add custom key-value tags and free-text annotations to experiment runs via programmatic API | [STORY-004-01-04](./FEATURE-004-01/STORY-004-01-04-tag-and-annotate-experiments.md) |
+| STORY-004-01-05 | Query Experiment History | Backend | Search and filter historical experiment metadata by time range, tag, metric threshold, and pipeline type | [STORY-004-01-05](./FEATURE-004-01/STORY-004-01-05-query-experiment-history.md) |
 
 ## Dependencies
 
