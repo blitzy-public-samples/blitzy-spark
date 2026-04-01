@@ -40,12 +40,12 @@ When a GET request is made to /api/v1/applications/[app-id]/streaming/recommenda
 Then the response is a JSON array where each element contains: queryId, queryName, recommendationType (EXECUTOR_SCALE_UP, EXECUTOR_SCALE_DOWN, MEMORY_INCREASE), currentValue, recommendedValue, confidence, reason (human-readable explanation), and generatedAt (ISO8601 timestamp)
 ```
 
-### AC-5: Error Handling — Insufficient Processing History
+### AC-5: Error Handling — Below-Minimum Processing History
 
 ```gherkin
 Given a streaming query that has completed fewer than 10 micro-batches (below the minimum analysis window)
 When the recommendation engine is invoked
-Then it returns an empty recommendations list with a status message "Insufficient processing history: 7 of minimum 10 batches completed" without throwing an exception
+Then it returns an empty recommendations list with a status message "Below-minimum processing history: 7 of minimum 10 batches completed" without throwing an exception
 ```
 
 ### AC-6: Edge Case — Scale Down Recommendation
@@ -116,7 +116,7 @@ Then the recommendation includes a note indicating that dynamic allocation is ac
 - Recommendations are displayed in the Spark Web UI Structured Streaming tab
 - Scale-up and scale-down scenarios are handled with configurable thresholds
 - Dynamic allocation mode is detected and recommendation text is adjusted accordingly
-- Insufficient history is handled with descriptive status messages
+- Below-minimum history is handled with descriptive status messages
 - Confidence scoring reflects the consistency and clarity of the observed patterns
 - Unit tests cover all scaling algorithms, edge cases, and boundary conditions
 - Integration tests validate REST API responses and Web UI display

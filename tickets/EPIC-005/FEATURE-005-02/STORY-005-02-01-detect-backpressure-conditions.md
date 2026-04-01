@@ -100,7 +100,7 @@ Then a backpressure-resolved event is emitted containing the query ID, recovery 
 ## Dependencies
 
 - **FEATURE-005-01: Stream Health Monitoring** — Provides the underlying processing rate and batch duration metrics that the backpressure detection logic consumes for threshold evaluation
-  - Link: [FEATURE-005-01-stream-health-monitoring.md](../../FEATURE-005-01-stream-health-monitoring.md)
+  - Link: [FEATURE-005-01-stream-health-monitoring.md](../FEATURE-005-01-stream-health-monitoring.md)
 - **StreamingQueryProgress API** (`sql/core/`) — Provides `inputRowsPerSecond`, `processedRowsPerSecond`, and `durationMs.triggerExecution` fields used as primary input signals for backpressure detection
   - `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/runtime/ProgressReporter.scala`
 - **ProgressReporter** — Source of per-batch progress events that feed into the `BackpressureDetector` evaluation loop
