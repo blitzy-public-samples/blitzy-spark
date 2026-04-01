@@ -4,23 +4,23 @@
 
 **As a** data engineer,
 **I want to** view a visual timeline of all stages within a SQL query execution in the Spark Web UI, showing each stage's start time, end time, duration, and key metrics (task deserialization time, executor run time, JVM GC time, result serialization time, scheduler delay, peak execution memory, shuffle read size, shuffle write size, memory spill size, and disk spill size),
-**So that** I can identify the longest-running stages and bottlenecks in a query's execution pipeline, reducing mean time to root-cause performance issues from hours to minutes and enabling targeted optimization of the most impactful stages.
+**so that** I can identify the longest-running stages and bottlenecks in a query's execution pipeline, reducing mean time to root-cause performance issues from hours to minutes and enabling targeted optimization of the most impactful stages.
 
 ## Acceptance Criteria
 
-**AC-1: Timeline Rendering for Completed Multi-Stage Queries (Expected Output)**
+### AC-1: Timeline Rendering for Completed Multi-Stage Queries (Expected Output)
 
 - **Given** a completed SQL query that executed across 5 or more stages
 - **When** the data engineer navigates to the SQL tab → Execution Detail page for that query in the Spark Web UI
 - **Then** the page displays a horizontal timeline chart where each stage is represented as a colored bar positioned on a time axis, with the bar's left edge at the stage start time and right edge at the stage end time, and the bar width is proportional to the stage duration
 
-**AC-2: Stage Metrics Display on Interaction (Expected Output)**
+### AC-2: Stage Metrics Display on Interaction (Expected Output)
 
 - **Given** a stage bar displayed in the execution timeline
 - **When** the data engineer hovers over or clicks on the stage bar
 - **Then** a tooltip or detail panel displays the following metrics: task deserialization time (ms), executor run time (ms), JVM GC time (ms), result serialization time (ms), scheduler delay (ms), peak execution memory (bytes), shuffle read size (bytes), shuffle write size (bytes), memory spill size (bytes), and disk spill size (bytes)
 
-**AC-3: Non-Existent Execution ID Handling (Input Validation)**
+### AC-3: Non-Existent Execution ID Handling (Input Validation)
 
 - **Given** a query execution ID submitted via the Web UI URL parameter
 - **When** the execution ID does not exist in the SQLAppStatusStore (e.g., ID = -1 or ID = 999999999)
@@ -28,19 +28,19 @@
 
 `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLAppStatusStore.scala`
 
-**AC-4: Failed or Cancelled Query Display (Error Handling)**
+### AC-4: Failed or Cancelled Query Display (Error Handling)
 
 - **Given** a query that was cancelled or failed before any stages completed
 - **When** the data engineer views the execution detail page for that query
 - **Then** the timeline displays an empty state with a message indicating "No stage data available for this execution" and shows the query status as FAILED or CANCELLED with the recorded error message
 
-**AC-5: Single Stage Query Timeline (Edge Case)**
+### AC-5: Single Stage Query Timeline (Edge Case)
 
 - **Given** a query that executes entirely within a single stage (e.g., a `SELECT * FROM table LIMIT 10` with no shuffle)
 - **When** the data engineer views the timeline for this query
 - **Then** the timeline displays one stage bar spanning the full query execution duration, and the stage metrics are visible without requiring horizontal scrolling
 
-**AC-6: Parallel Stage Swim-Lane Visualization (Expected Output)**
+### AC-6: Parallel Stage Swim-Lane Visualization (Expected Output)
 
 - **Given** a query with stages that execute in parallel (e.g., two independent scan stages feeding a join)
 - **When** the data engineer views the timeline

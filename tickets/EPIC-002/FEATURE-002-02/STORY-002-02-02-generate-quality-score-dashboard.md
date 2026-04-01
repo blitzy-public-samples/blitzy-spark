@@ -6,19 +6,47 @@ As a **data platform administrator**, I want to view a dedicated Data Quality ta
 
 ## Acceptance Criteria
 
-- **AC-1 (Input Validation):** Given a Spark application with `spark.quality.ui.enabled` set to `true` in SparkConf, When the Spark Web UI loads, Then a "Data Quality" tab appears in the top navigation bar between the existing tabs (after the "Executors" tab) and is accessible via URL path `/quality/`
+### AC-1: Input Validation — Data Quality Tab Activation via Configuration
 
-- **AC-2 (Expected Output):** Given 3 DataFrames have been validated with quality rules during the application, When I navigate to the Data Quality tab, Then the dashboard displays a table with columns: DataFrame Name, Total Columns, Columns Passing, Columns Failing, Overall Quality Score (percentage), and Status Indicator — with one row per validated DataFrame
+- **Given** a Spark application with `spark.quality.ui.enabled` set to `true` in SparkConf
+- **When** the Spark Web UI loads
+- **Then** a "Data Quality" tab appears in the top navigation bar between the existing tabs (after the "Executors" tab) and is accessible via URL path `/quality/`
 
-- **AC-3 (Color Coding — Edge Case):** Given the quality threshold is configured as `spark.quality.ui.threshold` with a default value of 0.8 (80%), When a DataFrame has an overall quality score of 0.92, Then its status indicator displays a green badge; and When another DataFrame has a quality score of 0.65, Then its status indicator displays a red badge
+### AC-2: Expected Output — Dashboard Displays Per-DataFrame Quality Summary
 
-- **AC-4 (Error Handling):** Given no DataFrames have been validated with quality rules during the application, When I navigate to the Data Quality tab, Then the dashboard displays an informational message stating "No quality validation results available" instead of an empty table or an error page
+- **Given** 3 DataFrames have been validated with quality rules during the application
+- **When** I navigate to the Data Quality tab
+- **Then** the dashboard displays a table with columns: DataFrame Name, Total Columns, Columns Passing, Columns Failing, Overall Quality Score (percentage), and Status Indicator — with one row per validated DataFrame
 
-- **AC-5 (Drill-Down):** Given the Data Quality tab displays 5 validated DataFrames, When I click on a specific DataFrame row, Then the view expands to show per-column quality metrics including column name, non-null ratio, distinct count, rule violations count, and individual column pass/fail status
+### AC-3: Edge Case — Color-Coded Status Badges Based on Threshold
 
-- **AC-6 (Refresh):** Given new DataFrames are validated while the Data Quality tab is open, When the page auto-refreshes at the interval configured by `spark.ui.retainedDeadExecutors` (default behavior), Then newly validated DataFrames appear in the dashboard table without requiring a full page reload
+- **Given** the quality threshold is configured as `spark.quality.ui.threshold` with a default value of 0.8 (80%)
+- **When** a DataFrame has an overall quality score of 0.92
+- **Then** its status indicator displays a green badge; and when another DataFrame has a quality score of 0.65, its status indicator displays a red badge
 
-- **AC-7 (Security):** Given Spark ACLs are enabled via `spark.acls.enable=true`, When a user without view permissions accesses the Data Quality tab URL, Then the server returns HTTP 403 Forbidden status consistent with other Spark UI tab access control behavior
+### AC-4: Error Handling — Empty State When No Validations Exist
+
+- **Given** no DataFrames have been validated with quality rules during the application
+- **When** I navigate to the Data Quality tab
+- **Then** the dashboard displays an informational message stating "No quality validation results available" instead of an empty table or an error page
+
+### AC-5: Expected Output — Drill-Down Per-Column Quality Metrics
+
+- **Given** the Data Quality tab displays 5 validated DataFrames
+- **When** I click on a specific DataFrame row
+- **Then** the view expands to show per-column quality metrics including column name, non-null ratio, distinct count, rule violations count, and individual column pass/fail status
+
+### AC-6: Expected Output — Auto-Refresh Displays Newly Validated DataFrames
+
+- **Given** new DataFrames are validated while the Data Quality tab is open
+- **When** the page auto-refreshes at the interval configured by `spark.ui.retainedDeadExecutors` (default behavior)
+- **Then** newly validated DataFrames appear in the dashboard table without requiring a full page reload
+
+### AC-7: Error Handling — ACL Enforcement on Data Quality Tab
+
+- **Given** Spark ACLs are enabled via `spark.acls.enable=true`
+- **When** a user without view permissions accesses the Data Quality tab URL
+- **Then** the server returns HTTP 403 Forbidden status consistent with other Spark UI tab access control behavior
 
 ## Sub-Tasks
 

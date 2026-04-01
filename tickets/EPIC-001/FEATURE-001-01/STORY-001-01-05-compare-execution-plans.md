@@ -6,7 +6,7 @@
 
 **I want to** select two SQL query execution plans and view them side-by-side in the Spark Web UI, with differences in operators, metrics, and plan structure highlighted visually — added operators in green, removed operators in red, and modified operators in amber,
 
-**So that** I can measure the impact of query optimizations (such as adding broadcast hints, changing join strategies, or modifying partition counts) by comparing execution plans before and after changes, reducing the optimization validation cycle from multiple hours of manual plan inspection to under 10 minutes per comparison.
+**so that** I can measure the impact of query optimizations (such as adding broadcast hints, changing join strategies, or modifying partition counts) by comparing execution plans before and after changes, reducing the optimization validation cycle from multiple hours of manual plan inspection to under 10 minutes per comparison.
 
 ---
 

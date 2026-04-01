@@ -89,42 +89,42 @@ Two data engineers request the same execution's optimization report simultaneous
 
 ## Dependencies
 
-| Dependency | Type | Description |
-|---|---|---|
-| [STORY-001-02-01 — Detect Data Skew Patterns](./STORY-001-02-01-detect-data-skew-patterns.md) | Story | Provides skew analysis results (skewed partitions, severity, affected stages) for aggregation into the consolidated report |
-| [STORY-001-02-02 — Recommend Join Strategy Changes](./STORY-001-02-02-recommend-join-strategy-changes.md) | Story | Provides join recommendation results (current vs recommended strategy, estimated impact) for aggregation into the consolidated report |
-| [STORY-001-02-03 — Suggest Partition Optimization](./STORY-001-02-03-suggest-partition-optimization.md) | Story | Provides partition recommendation results (current vs recommended partition counts, data distribution analysis) for aggregation into the consolidated report |
-| [STORY-001-02-04 — Identify Missing Cache Opportunities](./STORY-001-02-04-identify-missing-cache-opportunities.md) | Story | Provides cache recommendation results (caching candidates, estimated time savings, memory impact) for aggregation into the consolidated report |
-| [FEATURE-001-01 — Query Execution Profiling](../FEATURE-001-01-query-execution-profiling.md) | Feature | Provides profiling data and execution metrics as the foundation for all analyses consumed by this report |
-| [FEATURE-001-02 — Automated Optimization Recommendations](../FEATURE-001-02-automated-optimization-recommendations.md) | Feature | Parent feature defining the scope and context for this story |
-| [EPIC-001 — Adaptive Query Performance Insights Engine](../../EPIC-001-adaptive-query-performance-insights.md) | Epic | Parent epic establishing the overarching goal of reducing manual SQL optimization effort |
-| `SQLAppStatusStore` | Code | Execution data persistence layer — provides `executionsList()`, `execution()`, `executionMetrics()`, and `planGraph()` methods for retrieving query execution data used to populate report content. `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLAppStatusStore.scala` |
-| `docs/tuning.md` | Documentation | Performance tuning reference content for contextualizing recommendations — serialization tuning (Kryo vs Java serialization), memory management (`spark.memory.fraction`, `spark.memory.storageFraction`), and GC guidance. `Source: docs/tuning.md` |
-| `docs/sql-performance-tuning.md` | Documentation | SQL-specific tuning reference for configuration parameter recommendations — AQE settings (`spark.sql.adaptive.enabled`, `spark.sql.adaptive.coalescePartitions.*`, `spark.sql.adaptive.skewJoin.*`), join strategies (`spark.sql.autoBroadcastJoinThreshold`), partitioning (`spark.sql.shuffle.partitions`), and caching configuration (`spark.sql.inMemoryColumnarStorage.*`). `Source: docs/sql-performance-tuning.md` |
-| `docs/monitoring.md` | Documentation | REST API documentation for `/api/v1/applications/[app-id]/...` endpoints used as the pattern for optimization report endpoints; metrics sinks (ConsoleSink, CSVSink, JmxSink, MetricsServlet, GraphiteSink) for report distribution. `Source: docs/monitoring.md` |
-| Jackson JSON library (version 2.20.0) | External Library | JSON serialization for structured report export via the REST API |
-| Spark Web UI | Infrastructure | Display surface for the optimization summary panel within the SQL execution detail page |
+- **STORY-001-02-01 — Detect Data Skew Patterns**: Provides skew analysis results (skewed partitions, severity, affected stages) for aggregation into the consolidated report
+  - `Source: tickets/EPIC-001/FEATURE-001-02/STORY-001-02-01-detect-data-skew-patterns.md`
+- **STORY-001-02-02 — Recommend Join Strategy Changes**: Provides join recommendation results (current vs recommended strategy, estimated impact) for aggregation into the consolidated report
+  - `Source: tickets/EPIC-001/FEATURE-001-02/STORY-001-02-02-recommend-join-strategy-changes.md`
+- **STORY-001-02-03 — Suggest Partition Optimization**: Provides partition recommendation results (current vs recommended partition counts, data distribution analysis) for aggregation into the consolidated report
+  - `Source: tickets/EPIC-001/FEATURE-001-02/STORY-001-02-03-suggest-partition-optimization.md`
+- **STORY-001-02-04 — Identify Missing Cache Opportunities**: Provides cache recommendation results (caching candidates, estimated time savings, memory impact) for aggregation into the consolidated report
+  - `Source: tickets/EPIC-001/FEATURE-001-02/STORY-001-02-04-identify-missing-cache-opportunities.md`
+- **FEATURE-001-01 — Query Execution Profiling**: Provides profiling data and execution metrics as the foundation for all analyses consumed by this report
+  - `Source: tickets/EPIC-001/FEATURE-001-01-query-execution-profiling.md`
+- **FEATURE-001-02 — Automated Optimization Recommendations**: Parent feature defining the scope and context for this story
+  - `Source: tickets/EPIC-001/FEATURE-001-02-automated-optimization-recommendations.md`
+- **EPIC-001 — Adaptive Query Performance Insights Engine**: Parent epic establishing the overarching goal of reducing manual SQL optimization effort
+  - `Source: tickets/EPIC-001-adaptive-query-performance-insights.md`
+- **SQLAppStatusStore**: Execution data persistence layer — provides `executionsList()`, `execution()`, `executionMetrics()`, and `planGraph()` methods for retrieving query execution data used to populate report content
+  - `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLAppStatusStore.scala`
+- **docs/tuning.md**: Performance tuning reference content for contextualizing recommendations — serialization tuning (Kryo vs Java serialization), memory management (`spark.memory.fraction`, `spark.memory.storageFraction`), and GC guidance
+  - `Source: docs/tuning.md`
+- **docs/sql-performance-tuning.md**: SQL-specific tuning reference for configuration parameter recommendations — AQE settings (`spark.sql.adaptive.enabled`, `spark.sql.adaptive.coalescePartitions.*`, `spark.sql.adaptive.skewJoin.*`), join strategies (`spark.sql.autoBroadcastJoinThreshold`), partitioning (`spark.sql.shuffle.partitions`), and caching configuration (`spark.sql.inMemoryColumnarStorage.*`)
+  - `Source: docs/sql-performance-tuning.md`
+- **docs/monitoring.md**: REST API documentation for `/api/v1/applications/[app-id]/...` endpoints used as the pattern for optimization report endpoints; metrics sinks (ConsoleSink, CSVSink, JmxSink, MetricsServlet, GraphiteSink) for report distribution
+  - `Source: docs/monitoring.md`
+- **Jackson JSON library (version 2.20.0)**: JSON serialization for structured report export via the REST API
+- **Spark Web UI**: Display surface for the optimization summary panel within the SQL execution detail page
 
 ## Story Estimation Guidance
 
-| Attribute | Value |
-|---|---|
-| **Story Points** | 8 |
-| **Fibonacci Scale** | 1, 2, 3, 5, **8**, 13 |
-| **Sprint Fit** | Completable within a single sprint with focused effort |
-
-### Justification
-
-This story is estimated at **8 story points** based on the following complexity factors:
-
-1. **Aggregation across 4 recommendation categories** requires a unified data model that normalizes different recommendation types (skew, join, partition, cache) into a common format with consistent severity, impact, and action fields
-2. **Severity-based prioritization with non-additive impact estimation** requires careful algorithmic design to avoid double-counting overlapping benefits when multiple recommendations target the same execution stage
-3. **Two export formats** (JSON with Jackson, CSV with RFC 4180 compliance) each require dedicated serialization logic with format-specific handling for nested data structures, null values, and special characters
-4. **Two REST API endpoints** (per-execution report and session-level aggregate report) with format query parameter, pagination support, and structured error handling
-5. **Session-level aggregation** with de-duplication of configuration change suggestions across multiple query executions adds significant consolidation logic
-6. **Web UI panel** with expandable sections, severity-colored indicators, and download functionality requires frontend integration work
-
-The `SQLAppStatusStore` provides a solid persistence foundation with read-only access patterns, but the consolidation, prioritization, and multi-format presentation logic is entirely new.
+- **Story Points**: 8 (Fibonacci scale)
+- **Justification**: This story is estimated at 8 story points due to high complexity across multiple dimensions. The `SQLAppStatusStore` provides a solid persistence foundation with read-only access patterns, but the consolidation, prioritization, and multi-format presentation logic is entirely new.
+- **Complexity Factors**:
+  - Aggregation across 4 recommendation categories: requires a unified data model that normalizes different recommendation types (skew, join, partition, cache) into a common format with consistent severity, impact, and action fields
+  - Severity-based prioritization with non-additive impact estimation: requires careful algorithmic design to avoid double-counting overlapping benefits when multiple recommendations target the same execution stage
+  - Two export formats (JSON with Jackson, CSV with RFC 4180 compliance): each require dedicated serialization logic with format-specific handling for nested data structures, null values, and special characters
+  - Two REST API endpoints (per-execution report and session-level aggregate report): with format query parameter, pagination support, and structured error handling
+  - Session-level aggregation: de-duplication of configuration change suggestions across multiple query executions adds significant consolidation logic
+  - Web UI panel: expandable sections, severity-colored indicators, and download functionality requires frontend integration work
 
 ## Definition of Done
 

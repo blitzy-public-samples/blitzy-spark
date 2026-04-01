@@ -6,19 +6,47 @@ As a **data engineer**, I want to export data quality reports in both JSON and C
 
 ## Acceptance Criteria
 
-- **AC-1 (Input Validation — Programmatic API)**: Given a validated DataFrame with quality metrics computed, When I call `qualityReport.export(format="json", path="/output/report.json")`, Then the system writes a JSON file to the specified path containing an array of objects with fields: `dataframeName`, `timestamp`, `overallQualityScore`, `columnCount`, `columnsPassingCount`, `columnsFailingCount`, and a `columnDetails` array with per-column metrics (`columnName`, `nonNullRatio`, `nullCount`, `distinctCount`, `ruleViolations`).
+### AC-1: Input Validation — Programmatic JSON Export Writes Structured Report
 
-- **AC-2 (Expected Output — CSV)**: Given a validated DataFrame "orders" with 12 columns, When I call `qualityReport.export(format="csv", path="/output/report.csv")`, Then the system writes a CSV file with a header row (`dataframe_name`, `column_name`, `non_null_ratio`, `null_count`, `distinct_count`, `rule_violations`, `quality_score`) and exactly 12 data rows (one per column), with all numeric values formatted to 4 decimal places for ratios and integers for counts.
+- **Given** a validated DataFrame with quality metrics computed
+- **When** I call `qualityReport.export(format="json", path="/output/report.json")`
+- **Then** the system writes a JSON file to the specified path containing an array of objects with fields: `dataframeName`, `timestamp`, `overallQualityScore`, `columnCount`, `columnsPassingCount`, `columnsFailingCount`, and a `columnDetails` array with per-column metrics (`columnName`, `nonNullRatio`, `nullCount`, `distinctCount`, `ruleViolations`)
 
-- **AC-3 (Error Handling — Invalid Format)**: Given a quality report export request with `format="xml"`, When the export method is invoked, Then the system raises an `IllegalArgumentException` with message `"Unsupported export format: xml. Supported formats are: json, csv"`.
+### AC-2: Expected Output — CSV Export Produces Per-Column Tabular Data
 
-- **AC-4 (Error Handling — Invalid Path)**: Given a quality report export request with `path="/nonexistent/directory/report.json"`, When the export method is invoked and the parent directory does not exist, Then the system raises an `IOException` with a message identifying the invalid output path.
+- **Given** a validated DataFrame "orders" with 12 columns
+- **When** I call `qualityReport.export(format="csv", path="/output/report.csv")`
+- **Then** the system writes a CSV file with a header row (`dataframe_name`, `column_name`, `non_null_ratio`, `null_count`, `distinct_count`, `rule_violations`, `quality_score`) and exactly 12 data rows (one per column), with all numeric values formatted to 4 decimal places for ratios and integers for counts
 
-- **AC-5 (REST API — JSON)**: Given the Spark application has quality validation results, When I send a GET request to `/api/v1/quality/reports?format=json`, Then the endpoint returns HTTP 200 with Content-Type `application/json` and a JSON body containing quality report data for all validated DataFrames in the current application.
+### AC-3: Error Handling — Invalid Export Format Raises IllegalArgumentException
 
-- **AC-6 (REST API — CSV)**: Given the Spark application has quality validation results, When I send a GET request to `/api/v1/quality/reports?format=csv`, Then the endpoint returns HTTP 200 with Content-Type `text/csv` and a CSV body with headers and one row per column per validated DataFrame.
+- **Given** a quality report export request with `format="xml"`
+- **When** the export method is invoked
+- **Then** the system raises an `IllegalArgumentException` with message `"Unsupported export format: xml. Supported formats are: json, csv"`
 
-- **AC-7 (REST API — Filtered)**: Given 5 DataFrames have been validated, When I send a GET request to `/api/v1/quality/reports?format=json&dataframe=orders`, Then the endpoint returns quality report data only for the "orders" DataFrame, excluding all other DataFrames.
+### AC-4: Error Handling — Invalid Output Path Raises IOException
+
+- **Given** a quality report export request with `path="/nonexistent/directory/report.json"`
+- **When** the export method is invoked and the parent directory does not exist
+- **Then** the system raises an `IOException` with a message identifying the invalid output path
+
+### AC-5: Expected Output — REST API Returns JSON Quality Report
+
+- **Given** the Spark application has quality validation results
+- **When** I send a GET request to `/api/v1/quality/reports?format=json`
+- **Then** the endpoint returns HTTP 200 with Content-Type `application/json` and a JSON body containing quality report data for all validated DataFrames in the current application
+
+### AC-6: Expected Output — REST API Returns CSV Quality Report
+
+- **Given** the Spark application has quality validation results
+- **When** I send a GET request to `/api/v1/quality/reports?format=csv`
+- **Then** the endpoint returns HTTP 200 with Content-Type `text/csv` and a CSV body with headers and one row per column per validated DataFrame
+
+### AC-7: Expected Output — REST API Supports DataFrame Filtering
+
+- **Given** 5 DataFrames have been validated
+- **When** I send a GET request to `/api/v1/quality/reports?format=json&dataframe=orders`
+- **Then** the endpoint returns quality report data only for the "orders" DataFrame, excluding all other DataFrames
 
 ## Sub-Tasks
 

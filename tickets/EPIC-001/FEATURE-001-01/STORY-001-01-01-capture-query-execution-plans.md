@@ -4,7 +4,7 @@
 
 **As a** data engineer,
 **I want to** capture and persist the logical and physical execution plans for every completed SQL query,
-**So that** I can review the complete plan hierarchy (analyzed → optimized → physical → executed) after query completion, reducing post-mortem debugging time by up to 40% and enabling systematic query optimization without re-running queries.
+**so that** I can review the complete plan hierarchy (analyzed → optimized → physical → executed) after query completion, reducing post-mortem debugging time by up to 40% and enabling systematic query optimization without re-running queries.
 
 ## Acceptance Criteria
 

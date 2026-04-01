@@ -6,17 +6,41 @@ As a **data analyst**, I want to compute completeness metrics — including non-
 
 ## Acceptance Criteria
 
-- **AC-1 (Input Validation):** Given a DataFrame with 10 columns of mixed types (string, integer, double, boolean, timestamp), When I invoke the completeness metrics computation API, Then the system returns a summary DataFrame with exactly one row per input column containing column_name (string), total_row_count (long), non_null_count (long), null_count (long), non_null_ratio (double between 0.0 and 1.0), and distinct_value_count (long)
+### AC-1: Input Validation — Completeness Metrics Summary Schema
 
-- **AC-2 (Expected Output):** Given a DataFrame with 1,000 rows where column "email" contains 150 null values, When completeness metrics are computed for column "email", Then null_count equals 150, non_null_count equals 850, non_null_ratio equals 0.85, and total_row_count equals 1000
+- **Given** a DataFrame with 10 columns of mixed types (string, integer, double, boolean, timestamp)
+- **When** I invoke the completeness metrics computation API
+- **Then** the system returns a summary DataFrame with exactly one row per input column containing column_name (string), total_row_count (long), non_null_count (long), null_count (long), non_null_ratio (double between 0.0 and 1.0), and distinct_value_count (long)
 
-- **AC-3 (Error Handling):** Given a DataFrame with zero rows (empty DataFrame), When completeness metrics are computed, Then the system returns a summary DataFrame with one row per column where total_row_count is 0, null_count is 0, non_null_count is 0, non_null_ratio is 0.0, and distinct_value_count is 0
+### AC-2: Expected Output — Column Null Distribution Metrics
 
-- **AC-4 (Edge Case):** Given a DataFrame where column "status" contains only null values (100% null), When completeness metrics are computed for column "status", Then null_count equals total_row_count, non_null_count equals 0, non_null_ratio equals 0.0, and distinct_value_count equals 0
+- **Given** a DataFrame with 1,000 rows where column "email" contains 150 null values
+- **When** completeness metrics are computed for column "email"
+- **Then** null_count equals 150, non_null_count equals 850, non_null_ratio equals 0.85, and total_row_count equals 1000
 
-- **AC-5 (Subset Selection):** Given a DataFrame with 20 columns, When I invoke completeness metrics computation specifying a subset of 5 column names, Then the summary DataFrame contains exactly 5 rows corresponding to the specified columns only
+### AC-3: Error Handling — Empty DataFrame Returns Zero Metrics
 
-- **AC-6 (Streaming Support):** Given a streaming DataFrame with watermark configured, When completeness metrics are computed on a micro-batch, Then the metrics are calculated for the rows within that micro-batch and the output schema matches the batch completeness metrics schema
+- **Given** a DataFrame with zero rows (empty DataFrame)
+- **When** completeness metrics are computed
+- **Then** the system returns a summary DataFrame with one row per column where total_row_count is 0, null_count is 0, non_null_count is 0, non_null_ratio is 0.0, and distinct_value_count is 0
+
+### AC-4: Edge Case — All-Null Column Returns Zero Non-Null Metrics
+
+- **Given** a DataFrame where column "status" contains only null values (100% null)
+- **When** completeness metrics are computed for column "status"
+- **Then** null_count equals total_row_count, non_null_count equals 0, non_null_ratio equals 0.0, and distinct_value_count equals 0
+
+### AC-5: Expected Output — Subset Column Selection Returns Filtered Results
+
+- **Given** a DataFrame with 20 columns
+- **When** I invoke completeness metrics computation specifying a subset of 5 column names
+- **Then** the summary DataFrame contains exactly 5 rows corresponding to the specified columns only
+
+### AC-6: Edge Case — Streaming DataFrame Micro-Batch Metrics
+
+- **Given** a streaming DataFrame with watermark configured
+- **When** completeness metrics are computed on a micro-batch
+- **Then** the metrics are calculated for the rows within that micro-batch and the output schema matches the batch completeness metrics schema
 
 ## Sub-Tasks
 

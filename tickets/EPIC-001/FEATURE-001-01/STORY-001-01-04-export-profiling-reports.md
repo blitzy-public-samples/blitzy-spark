@@ -4,11 +4,11 @@
 
 **As a** data scientist,
 **I want to** export query profiling data — including execution plans, stage metrics, operator-level metrics, and resource utilization — in both JSON (structured, machine-readable) and CSV (tabular, spreadsheet-compatible) formats,
-**So that** I can import profiling data into external analysis tools (Jupyter notebooks, pandas DataFrames, Excel, custom dashboards) to perform statistical analysis on query performance patterns, identify recurring bottlenecks across hundreds of queries, and produce performance trend reports that reduce the time spent on manual performance analysis by up to 50%.
+**so that** I can import profiling data into external analysis tools (Jupyter notebooks, pandas DataFrames, Excel, custom dashboards) to perform statistical analysis on query performance patterns, identify recurring bottlenecks across hundreds of queries, and produce performance trend reports that reduce the time spent on manual performance analysis by up to 50%.
 
 ## Acceptance Criteria
 
-**AC-1: JSON Export Returns Complete Profiling Data (Expected Output)**
+### AC-1: JSON Export Returns Complete Profiling Data (Expected Output)
 
 - **Given** a completed SQL query with execution ID 42 persisted in the `SQLAppStatusStore` KVStore
 - **When** the data scientist sends a GET request to `/api/v1/applications/[app-id]/sql/42/profile?format=json`
@@ -26,7 +26,7 @@
 
 > `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLAppStatusStore.scala` — `SQLExecutionUIData`, `SQLPlanMetric`, `SparkPlanGraphWrapper`
 
-**AC-2: CSV Export Returns Tabular Operator-Level Metrics (Expected Output)**
+### AC-2: CSV Export Returns Tabular Operator-Level Metrics (Expected Output)
 
 - **Given** a completed SQL query with execution ID 42 persisted in the `SQLAppStatusStore` KVStore
 - **When** the data scientist sends a GET request to `/api/v1/applications/[app-id]/sql/42/profile?format=csv`
@@ -44,13 +44,13 @@
 
 > `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLAppStatusStore.scala` — `SparkPlanGraphWrapper`, `SparkPlanGraphNodeWrapper`
 
-**AC-3: Unsupported Format Parameter Returns HTTP 400 (Input Validation)**
+### AC-3: Unsupported Format Parameter Returns HTTP 400 (Input Validation)
 
 - **Given** a profiling export request with an unsupported format parameter value (e.g., `?format=xml` or `?format=pdf`)
 - **When** the API processes the request
 - **Then** the API returns an HTTP 400 response with a JSON body containing `{"error": "Unsupported export format 'xml'. Supported formats: json, csv"}` and does not generate any export file or stream any partial data to the client
 
-**AC-4: Running Query Export Returns Partial Data with Status Flag (Error Handling)**
+### AC-4: Running Query Export Returns Partial Data with Status Flag (Error Handling)
 
 - **Given** a profiling export request for a query whose `SQLExecutionUIData.completionTime` is `None` (still in RUNNING status)
 - **When** the data scientist requests the export via GET to `/api/v1/applications/[app-id]/sql/[execution-id]/profile?format=json`
@@ -58,13 +58,13 @@
 
 > `Source: sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLAppStatusListener.scala` — `liveExecutionMetrics()` method for in-flight metric retrieval
 
-**AC-5: Bulk Export Handles 500+ Queries Using Streaming Output (Edge Case)**
+### AC-5: Bulk Export Handles 500+ Queries Using Streaming Output (Edge Case)
 
 - **Given** a SparkSession with 500 completed queries stored in the `SQLAppStatusStore` KVStore
 - **When** the data scientist sends a GET request to `/api/v1/applications/[app-id]/sql/profile?format=json` (bulk export without a specific execution ID)
 - **Then** the API returns profiling data for all 500 queries within 10 seconds, the response uses streaming JSON output (JSON Lines format or a JSON array emitted incrementally via Jackson `JsonGenerator`) to avoid loading all query data into memory simultaneously, and the response includes a `Content-Length` header or uses chunked transfer encoding for responses exceeding 10 MB
 
-**AC-6: Exported Metrics Match All Physical Operators in Plan Tree (Expected Output)**
+### AC-6: Exported Metrics Match All Physical Operators in Plan Tree (Expected Output)
 
 - **Given** a query that included join operators, aggregation operators, and window function operators across 3 stages
 - **When** the data scientist exports the profiling report in JSON format via the `/api/v1/applications/[app-id]/sql/[execution-id]/profile?format=json` endpoint

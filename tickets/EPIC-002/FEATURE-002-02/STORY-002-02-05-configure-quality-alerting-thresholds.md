@@ -6,32 +6,60 @@ As a **data platform administrator**, I want to configure quality alerting thres
 
 ## Acceptance Criteria
 
-- **AC-1 (Input Validation):** Given a SparkConf with property `spark.quality.alert.threshold.orders.non_null_ratio=0.95`, When quality validation completes for DataFrame "orders" and column "email" has non_null_ratio of 0.88, Then a Dropwizard Gauge named `spark.quality.alert.orders.email.non_null_ratio` is registered in the MetricRegistry with value 0.88, and a companion Gauge named `spark.quality.alert.orders.email.threshold_breached` is registered with value 1 (indicating breach).
+### AC-1: Input Validation — Threshold Breach Registers Gauge with Breach Indicator
 
-- **AC-2 (Expected Output — No Breach):** Given threshold `spark.quality.alert.threshold.orders.non_null_ratio=0.90`, When column "customer_id" has non_null_ratio of 0.98, Then the Gauge `spark.quality.alert.orders.customer_id.non_null_ratio` reports value 0.98 and `spark.quality.alert.orders.customer_id.threshold_breached` reports value 0 (no breach).
+- **Given** a SparkConf with property `spark.quality.alert.threshold.orders.non_null_ratio=0.95`
+- **When** quality validation completes for DataFrame "orders" and column "email" has non_null_ratio of 0.88
+- **Then** a Dropwizard Gauge named `spark.quality.alert.orders.email.non_null_ratio` is registered in the MetricRegistry with value 0.88, and a companion Gauge named `spark.quality.alert.orders.email.threshold_breached` is registered with value 1 (indicating breach)
 
-- **AC-3 (Error Handling):** Given a threshold property `spark.quality.alert.threshold.orders.non_null_ratio=abc` (non-numeric value), When the configuration is loaded during MetricsSystem initialization, Then the system logs a warning message identifying the invalid threshold value and property key, and uses the default threshold of 0.8 for that rule.
+### AC-2: Expected Output — No Breach Scenario Reports Zero Breach Status
 
-- **AC-4 (Sink Propagation):** Given the metrics.properties file configures a Prometheus sink and a JMX sink, When a quality threshold breach is detected for DataFrame "orders", Then the breach Gauge value is visible in the Prometheus exposition endpoint (`/metrics/prometheus/`) and in JMX MBeans within 1 reporting cycle (default 10 seconds as configured in MetricsConfig).
+- **Given** threshold `spark.quality.alert.threshold.orders.non_null_ratio=0.90`
+- **When** column "customer_id" has non_null_ratio of 0.98
+- **Then** the Gauge `spark.quality.alert.orders.customer_id.non_null_ratio` reports value 0.98 and `spark.quality.alert.orders.customer_id.threshold_breached` reports value 0 (no breach)
 
-- **AC-5 (Per-DataFrame Configuration):** Given threshold `spark.quality.alert.threshold.orders.non_null_ratio=0.95` and `spark.quality.alert.threshold.customers.non_null_ratio=0.90`, When quality validation completes for both DataFrames, Then each DataFrame's metrics use its own configured threshold for breach detection independently.
+### AC-3: Error Handling — Non-Numeric Threshold Falls Back to Default
 
-- **AC-6 (Global Default):** Given no per-DataFrame threshold is configured but `spark.quality.alert.threshold.default.non_null_ratio=0.85` is set, When quality validation completes for DataFrame "products", Then the default threshold of 0.85 is used for breach detection on all columns of "products".
+- **Given** a threshold property `spark.quality.alert.threshold.orders.non_null_ratio=abc` (non-numeric value)
+- **When** the configuration is loaded during MetricsSystem initialization
+- **Then** the system logs a warning message identifying the invalid threshold value and property key, and uses the default threshold of 0.8 for that rule
 
-- **AC-7 (Metric Registration):** Given a quality alerting threshold is configured, When the `QualityMetricsSource` is registered with the MetricsSystem via `registerSource()`, Then all quality-related Gauges appear under the `spark.quality.alert.*` namespace in the MetricRegistry, following the source registration pattern in `core/src/main/scala/org/apache/spark/metrics/MetricsSystem.scala`.
+### AC-4: Expected Output — Sink Propagation Delivers Gauges to All Configured Sinks
+
+- **Given** the metrics.properties file configures a Prometheus sink and a JMX sink
+- **When** a quality threshold breach is detected for DataFrame "orders"
+- **Then** the breach Gauge value is visible in the Prometheus exposition endpoint (`/metrics/prometheus/`) and in JMX MBeans within 1 reporting cycle (default 10 seconds as configured in MetricsConfig)
+
+### AC-5: Expected Output — Per-DataFrame Threshold Configuration Applied Independently
+
+- **Given** threshold `spark.quality.alert.threshold.orders.non_null_ratio=0.95` and `spark.quality.alert.threshold.customers.non_null_ratio=0.90`
+- **When** quality validation completes for both DataFrames
+- **Then** each DataFrame's metrics use its own configured threshold for breach detection independently
+
+### AC-6: Edge Case — Global Default Threshold Used When Per-DataFrame Config Absent
+
+- **Given** no per-DataFrame threshold is configured but `spark.quality.alert.threshold.default.non_null_ratio=0.85` is set
+- **When** quality validation completes for DataFrame "products"
+- **Then** the default threshold of 0.85 is used for breach detection on all columns of "products"
+
+### AC-7: Expected Output — Metric Registration Follows MetricsSystem Source Pattern
+
+- **Given** a quality alerting threshold is configured
+- **When** the `QualityMetricsSource` is registered with the MetricsSystem via `registerSource()`
+- **Then** all quality-related Gauges appear under the `spark.quality.alert.*` namespace in the MetricRegistry, following the source registration pattern in `core/src/main/scala/org/apache/spark/metrics/MetricsSystem.scala`
 
 ## Sub-Tasks
 
-- [ ] Implement `QualityMetricsSource` class extending `org.apache.spark.metrics.source.Source` trait, providing `sourceName = "quality"` and a `MetricRegistry` instance, following the pattern of `JvmSource`, `JVMCPUSource`, and `AppStatusSource` in `core/src/main/scala/org/apache/spark/metrics/source/`
-- [ ] Implement quality threshold configuration parser that reads `spark.quality.alert.threshold.<dataframe>.<metric>` properties from SparkConf using the property prefix pattern, following the configuration loading approach in `core/src/main/scala/org/apache/spark/metrics/MetricsConfig.scala`
-- [ ] Implement `registerQualityGauges(dataframeName: String, columnName: String, metricName: String, currentValue: Double, threshold: Double)` method that registers two Gauges in the MetricRegistry: one for the current metric value and one for threshold breach status (1 for breach, 0 for no breach)
-- [ ] Register `QualityMetricsSource` with the `MetricsSystem` during quality subsystem initialization using `metricsSystem.registerSource(qualityMetricsSource)`, following the source registration lifecycle in `core/src/main/scala/org/apache/spark/metrics/MetricsSystem.scala`
-- [ ] Implement threshold resolution logic: first check per-DataFrame threshold (`spark.quality.alert.threshold.<dataframe>.<metric>`), then fall back to global default (`spark.quality.alert.threshold.default.<metric>`), then fall back to system default (0.8)
-- [ ] Ensure gauge updates are atomic and thread-safe using `AtomicDouble` or `AtomicLong` for gauge backing values, following the pattern of `AppStatusSource` counters in `core/src/main/scala/org/apache/spark/status/AppStatusSource.scala`
-- [ ] Validate that metrics flow to all configured sinks (Prometheus, JMX, Graphite, StatsD, Console, CSV, Slf4j) via the existing sink infrastructure in `core/src/main/scala/org/apache/spark/metrics/sink/`
-- [ ] Add configuration parameters: `spark.quality.alert.threshold.<dataframe>.<metric>`, `spark.quality.alert.threshold.default.<metric>`, and `spark.quality.alert.enabled` (boolean, default true)
-- [ ] Write unit tests for threshold parsing, gauge registration, breach detection logic, default fallback, and invalid configuration handling
-- [ ] Write integration test validating metric propagation to Prometheus and JMX sinks after a quality validation event
+- Implement `QualityMetricsSource` class extending `org.apache.spark.metrics.source.Source` trait, providing `sourceName = "quality"` and a `MetricRegistry` instance, following the pattern of `JvmSource`, `JVMCPUSource`, and `AppStatusSource` in `core/src/main/scala/org/apache/spark/metrics/source/`
+- Implement quality threshold configuration parser that reads `spark.quality.alert.threshold.<dataframe>.<metric>` properties from SparkConf using the property prefix pattern, following the configuration loading approach in `core/src/main/scala/org/apache/spark/metrics/MetricsConfig.scala`
+- Implement `registerQualityGauges(dataframeName: String, columnName: String, metricName: String, currentValue: Double, threshold: Double)` method that registers two Gauges in the MetricRegistry: one for the current metric value and one for threshold breach status (1 for breach, 0 for no breach)
+- Register `QualityMetricsSource` with the `MetricsSystem` during quality subsystem initialization using `metricsSystem.registerSource(qualityMetricsSource)`, following the source registration lifecycle in `core/src/main/scala/org/apache/spark/metrics/MetricsSystem.scala`
+- Implement threshold resolution logic: first check per-DataFrame threshold (`spark.quality.alert.threshold.<dataframe>.<metric>`), then fall back to global default (`spark.quality.alert.threshold.default.<metric>`), then fall back to system default (0.8)
+- Ensure gauge updates are atomic and thread-safe using `AtomicDouble` or `AtomicLong` for gauge backing values, following the pattern of `AppStatusSource` counters in `core/src/main/scala/org/apache/spark/status/AppStatusSource.scala`
+- Validate that metrics flow to all configured sinks (Prometheus, JMX, Graphite, StatsD, Console, CSV, Slf4j) via the existing sink infrastructure in `core/src/main/scala/org/apache/spark/metrics/sink/`
+- Add configuration parameters: `spark.quality.alert.threshold.<dataframe>.<metric>`, `spark.quality.alert.threshold.default.<metric>`, and `spark.quality.alert.enabled` (boolean, default true)
+- Write unit tests for threshold parsing, gauge registration, breach detection logic, default fallback, and invalid configuration handling
+- Write integration test validating metric propagation to Prometheus and JMX sinks after a quality validation event
 
 ## Edge Cases
 

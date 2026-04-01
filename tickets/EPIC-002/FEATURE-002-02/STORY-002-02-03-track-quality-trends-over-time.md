@@ -6,12 +6,41 @@ As a **data engineer**, I want to track and query historical quality metric tren
 
 ## Acceptance Criteria
 
-- **AC-1 (Input Validation):** Given a pipeline has executed quality validation on a DataFrame named "orders", When the pipeline completes, Then the quality metrics (non-null ratio, distinct count, null count per column, overall quality score, timestamp, and pipeline run identifier) are persisted as a `QualityTrendEntry` entity in the AppStatusStore's KVStore with a composite index on (dataframe_name, timestamp)
-- **AC-2 (Expected Output):** Given 15 pipeline executions have been completed for DataFrame "orders", When I query the quality trend API with `getQualityTrend("orders", limit=10)`, Then the API returns the 10 most recent `QualityTrendEntry` records ordered by timestamp descending, each containing the full per-column quality metrics snapshot for that execution
-- **AC-3 (Error Handling):** Given a DataFrame name that has never been validated (e.g., "nonexistent_df"), When I query the quality trend API with `getQualityTrend("nonexistent_df")`, Then the API returns an empty sequence with zero entries and does not throw an exception
-- **AC-4 (Retention Policy):** Given `spark.quality.history.retainedRuns` is configured to 100 (default), When a 101st quality validation result is persisted for the same DataFrame, Then the oldest entry is removed by the ElementTrackingStore trigger mechanism, maintaining exactly 100 entries for that DataFrame
-- **AC-5 (Edge Case):** Given a pipeline writes quality metrics for 3 distinct DataFrames ("orders", "customers", "products") across 50 executions each, When I query `listTrackedDataFrames()`, Then the API returns exactly 3 distinct DataFrame names and each DataFrame retains its independent trend history limited by the per-DataFrame retention configuration
-- **AC-6 (Time Range Query):** Given 30 quality entries exist for DataFrame "orders" spanning a 30-day period, When I query `getQualityTrend("orders", startTime=dayMinus7, endTime=now)`, Then only entries with timestamps within the specified 7-day window are returned, ordered by timestamp descending
+### AC-1: Input Validation — Quality Metrics Persistence on Pipeline Completion
+
+- **Given** a pipeline has executed quality validation on a DataFrame named "orders"
+- **When** the pipeline completes
+- **Then** the quality metrics (non-null ratio, distinct count, null count per column, overall quality score, timestamp, and pipeline run identifier) are persisted as a `QualityTrendEntry` entity in the AppStatusStore's KVStore with a composite index on (dataframe_name, timestamp)
+
+### AC-2: Expected Output — Recent Trend Entries Retrieval with Limit
+
+- **Given** 15 pipeline executions have been completed for DataFrame "orders"
+- **When** I query the quality trend API with `getQualityTrend("orders", limit=10)`
+- **Then** the API returns the 10 most recent `QualityTrendEntry` records ordered by timestamp descending, each containing the full per-column quality metrics snapshot for that execution
+
+### AC-3: Error Handling — Non-Existent DataFrame Returns Empty Sequence
+
+- **Given** a DataFrame name that has never been validated (e.g., "nonexistent_df")
+- **When** I query the quality trend API with `getQualityTrend("nonexistent_df")`
+- **Then** the API returns an empty sequence with zero entries and does not throw an exception
+
+### AC-4: Expected Output — Retention Policy Enforces Maximum Entry Count
+
+- **Given** `spark.quality.history.retainedRuns` is configured to 100 (default)
+- **When** a 101st quality validation result is persisted for the same DataFrame
+- **Then** the oldest entry is removed by the ElementTrackingStore trigger mechanism, maintaining exactly 100 entries for that DataFrame
+
+### AC-5: Edge Case — Independent Per-DataFrame Trend History Isolation
+
+- **Given** a pipeline writes quality metrics for 3 distinct DataFrames ("orders", "customers", "products") across 50 executions each
+- **When** I query `listTrackedDataFrames()`
+- **Then** the API returns exactly 3 distinct DataFrame names and each DataFrame retains its independent trend history limited by the per-DataFrame retention configuration
+
+### AC-6: Expected Output — Time Range Query Returns Filtered Window
+
+- **Given** 30 quality entries exist for DataFrame "orders" spanning a 30-day period
+- **When** I query `getQualityTrend("orders", startTime=dayMinus7, endTime=now)`
+- **Then** only entries with timestamps within the specified 7-day window are returned, ordered by timestamp descending
 
 ## Sub-Tasks
 
