@@ -284,6 +284,42 @@ support tasks as short as 200 ms, because it reuses one executor JVM across many
 a low task launching cost, so you can safely increase the level of parallelism to more than the
 number of cores in your clusters.
 
+## Streaming Shuffle
+
+Spark 4.1.0 introduces an opt-in *streaming shuffle* engine that streams intermediate shuffle data
+directly from map (producer) tasks to reduce (consumer) tasks through bounded in-memory buffers,
+rather than first materializing it to disk as the default sort-based shuffle does. For shuffle-bound,
+latency-sensitive workloads — typically those moving 10GB or more of shuffle data across 100 or more
+partitions — this can reduce end-to-end shuffle latency by 30-50%. CPU-bound workloads see a smaller
+benefit (around 5-10%).
+
+Streaming shuffle is **disabled by default** and is activated only when you set both
+`spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true`. It **coexists with, and
+never replaces, the default sort-based shuffle**: the streaming manager composes a sort-based shuffle
+manager and automatically falls back to it for memory-bound workloads or whenever a fallback
+condition fires, so there is no regression risk for jobs that do not benefit from streaming.
+
+When tuning streaming shuffle, consider the following properties (all require an executor restart to
+take effect, as there is no dynamic reconfiguration in this version):
+
+* `spark.shuffle.streaming.bufferSizePercent` (default 20, range 1-50) controls the percent of
+  executor memory reserved for per-partition streaming buffers; the per-partition buffer size is
+  `(executorMemory * bufferSizePercent / 100) / numPartitions`. Increase it for workloads with
+  fewer, larger partitions; decrease it when executors are memory-constrained.
+* `spark.shuffle.streaming.spillThreshold` (default 80, range 50-95) sets the buffer-utilization
+  percent at which the largest buffered partitions spill to disk. Lower it if you observe memory
+  pressure; raise it (cautiously) to keep more data in memory on executors with ample memory.
+* `spark.shuffle.streaming.maxBandwidthMBps` (default 0, meaning unlimited) caps per-executor
+  streaming bandwidth via a token-bucket rate limiter. Set a finite value to protect a shared or
+  saturated network.
+
+If a consumer falls well behind its producer, memory pressure threatens buffer allocation, the
+network saturates, or producer and consumer versions differ, streaming shuffle automatically reverts
+to sort-based shuffle for the affected stage. For the full architecture, fallback model,
+troubleshooting, and feature-flag migration guidance, see the
+[Streaming Shuffle](streaming-shuffle.html) guide; for the complete list of properties, see the
+[Shuffle Behavior](configuration.html#shuffle-behavior) section of the configuration guide.
+
 ## Broadcasting Large Variables
 
 Using the [broadcast functionality](rdd-programming-guide.html#broadcast-variables)
