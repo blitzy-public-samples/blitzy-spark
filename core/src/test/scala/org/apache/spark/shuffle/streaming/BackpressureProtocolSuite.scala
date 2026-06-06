@@ -17,6 +17,8 @@
 
 package org.apache.spark.shuffle.streaming
 
+import java.util.concurrent.TimeUnit
+
 import org.mockito.Mockito.{atLeastOnce, mock, verify}
 import org.scalatest.PrivateMethodTester
 import org.scalatest.concurrent.Eventually
@@ -24,6 +26,10 @@ import org.scalatest.matchers.must.Matchers
 
 import org.apache.spark._
 import org.apache.spark.internal.config
+import org.apache.spark.memory.TestMemoryManager
+import org.apache.spark.shuffle.IndexShuffleBlockResolver
+import org.apache.spark.shuffle.streaming.StreamingBlockExchange.{BlockMeta, StreamingBlockConsumer}
+import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
 
 /**
  * Unit tests for [[BackpressureProtocol]], the streaming-shuffle flow-control and rate-limiting
@@ -112,7 +118,7 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with Private
     }
   }
 
-  test("consumer acknowledgment drives reclamation / flow-control state") {
+  test("a missing then recovered consumer heartbeat pauses and resumes the producer") {
     val conf = new SparkConf(false)
     val source = new StreamingShuffleSource
     withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
@@ -229,6 +235,92 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with Private
     noException must be thrownBy bp.stop()
     // ...and is guarded so repeated calls are safe (no double-shutdown error).
     noException must be thrownBy bp.stop()
+  }
+
+  test("consumer ack through the production API drives spill-manager reclamation to zero") {
+    // This is the ack->reclamation path that was previously untested: a reader's consumed-buffer
+    // acknowledgment must run through the REAL production API (StreamingBlockExchange.ack ->
+    // MemorySpillManager.reclaim) and release the writer-side buffer within the mandated 100ms.
+    val conf = new SparkConf(false)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val resolver = new IndexShuffleBlockResolver(conf)
+      val spill = new MemorySpillManager(conf, new TestMemoryManager(conf), resolver, source)
+      val exchange = new StreamingBlockExchange(conf, spill)
+      try {
+        // A reducer subscribes; a producer publishes one block -> the spill manager holds it.
+        val consumer = new StreamingBlockConsumer {
+          override def onBlockReceived(meta: BlockMeta, bytes: Array[Byte]): Unit = {}
+          override def onMapComplete(
+              mapId: Long, mapIndex: Int, blockCounts: Array[Long]): Unit = {}
+          override def onProducerFailed(bmAddress: BlockManagerId, mapId: Long, mapIndex: Int,
+              message: String, cause: Throwable): Unit = {}
+        }
+        exchange.registerReader(0, 0, 1, 0, 1, consumer)
+        val key = MemorySpillManager.BlockKey(0, 0L, 0, 0L)
+        val meta = StreamingBlockExchange.BlockMeta(
+          key, BlockManagerId("e", "h", 1), ShuffleBlockId(0, 0L, 0), 0, 0L, 2048L)
+        exchange.publishBlock(meta, Array.fill(2048)(7.toByte))
+        spill.trackedBytesTotal mustBe 2048L
+        spill.reservedBytesTotal mustBe 2048L
+
+        // Simulate the reader's consumed-buffer acknowledgment through the production path:
+        // exchange.ack -> reclaim, plus the backpressure consumer-progress liveness signal.
+        val startNanos = System.nanoTime()
+        exchange.ack(meta)
+        bp.recordConsumerProgress(2048L)
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
+
+        // Tracked AND reserved bytes drop to zero within 100ms: no buffer-memory leak after ack.
+        spill.trackedBytesTotal mustBe 0L
+        spill.reservedBytesTotal mustBe 0L
+        spill.read(key) mustBe None
+        elapsedMillis must be < 100L
+      } finally {
+        exchange.stop()
+        spill.stop()
+        resolver.stop()
+      }
+    }
+  }
+
+  test("a missing consumer heartbeat pauses producer emission on the acquire path") {
+    // Default conf => unlimited bandwidth, so any throttling we observe comes from the pause signal
+    // being ENFORCED on the acquisition path (not from token-bucket limiting).
+    val conf = new SparkConf(false)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val detectMissingConsumer = PrivateMethod[Unit](Symbol("detectMissingConsumer"))
+      // With unlimited bandwidth and a live consumer, a normal acquire is admitted.
+      bp.acquire(4096L) mustBe true
+      // Simulate the consumer heartbeat going missing past the connect deadline: producer pauses.
+      bp.invokePrivate(detectMissingConsumer(System.nanoTime() + secondsToNanos(16)))
+      bp.producerShouldPause mustBe true
+      // ENFORCEMENT (the previously-missing behavior): a paused producer MUST NOT emit, so acquire
+      // refuses the block even though bandwidth is unlimited, and records a backpressure event.
+      bp.acquire(4096L) mustBe false
+      backpressureEvents(source) must be >= 1L
+    }
+  }
+
+  test("a sustained-slow-consumer fallback signal fails the blocking acquire path") {
+    // Default conf => unlimited bandwidth, so a false from acquireBlocking can only come from the
+    // fallback signal being ENFORCED, not from token exhaustion.
+    val conf = new SparkConf(false)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val evaluateFallback = PrivateMethod[Unit](Symbol("evaluateFallback"))
+      // Before fallback, the blocking acquire is admitted immediately under unlimited bandwidth.
+      bp.acquireBlocking(4096L) mustBe true
+      // Drive the sustained-slowdown fallback (consumer 10x slower than producer for over 60s).
+      val t0 = System.nanoTime()
+      bp.invokePrivate(evaluateFallback(100.0, 10.0, t0))
+      bp.invokePrivate(evaluateFallback(100.0, 10.0, t0 + secondsToNanos(61)))
+      bp.shouldFallback mustBe true
+      // ENFORCEMENT: with fallback signaled, the blocking acquire returns false so the writer can
+      // degrade this shuffle to sort-based rather than emit into a stalled streaming path.
+      bp.acquireBlocking(4096L) mustBe false
+    }
   }
 
 }

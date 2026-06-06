@@ -28,7 +28,7 @@ import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.SerializationStream
 import org.apache.spark.shuffle.{ShuffleWriteMetricsReporter, ShuffleWriter}
-import org.apache.spark.storage.ShuffleBlockId
+import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
 
 /**
  * Map-side [[ShuffleWriter]] for the opt-in streaming shuffle engine. It is constructed by
@@ -67,11 +67,15 @@ import org.apache.spark.storage.ShuffleBlockId
  * streaming outputs EXACTLY as for sort-based shuffle. The writer never touches the scheduler
  * or the task lifecycle.
  *
- * Cleanup discipline: [[stop]] is idempotent (mirrors `SortShuffleWriter`) and its `finally` block
- * always releases every per-partition buffer back to the [[MemorySpillManager]] (and hence the
- * [[org.apache.spark.memory.MemoryManager]]) and closes every open serialization stream, so a
- * producer crash or a `stop(success = false)` leaks no buffer memory -- the property gated by the
- * 2-hour stress test in the suite.
+ * Output lifetime & cleanup: [[stop]] is idempotent (mirrors `SortShuffleWriter`). On a SUCCESSFUL
+ * stop the emitted blocks are RETAINED in the [[MemorySpillManager]] -- [[MapStatus]] advertises
+ * them to reducers, so they must outlive the map task and are reclaimed only when a consumer
+ * acknowledges them (through the [[StreamingBlockExchange]]) or the manager is torn down; releasing
+ * them on success would delete advertised outputs before reducers could read them. On a FAILED stop
+ * (or a producer crash) the writer reverts its buffered metrics, notifies subscribed readers via
+ * [[StreamingBlockExchange.producerFailed]] so they invalidate and recompute upstream, and frees
+ * every block this map registered via [[MemorySpillManager.unregisterMap]], so a failure leaks no
+ * buffer memory -- the property gated by the 2-hour stress test in the suite.
  *
  * Coexistence strategy: this writer is instantiated ONLY on the streaming path. The default
  * `SortShuffleManager` fallback never constructs it, so the sort-based shuffle carries zero
@@ -90,6 +94,8 @@ import org.apache.spark.storage.ShuffleBlockId
  * @param conf the active [[SparkConf]] supplying `spark.shuffle.*` settings
  * @param backpressure the shared producer/consumer flow-control + token-bucket rate limiter
  * @param spillManager the shared spill coordinator that bounds buffer memory via the MemoryManager
+ * @param exchange the in-process producer->consumer data path that delivers emitted blocks to the
+ *                 streaming reader and carries acknowledgments/retransmission requests back
  * @param metricsSource the shared JMX metrics source for streaming-shuffle telemetry
  * @tparam K the type of the keys being written
  * @tparam V the type of the values being written
@@ -102,6 +108,7 @@ private[spark] class StreamingShuffleWriter[K, V](
     conf: SparkConf,
     backpressure: BackpressureProtocol,
     spillManager: MemorySpillManager,
+    exchange: StreamingBlockExchange,
     metricsSource: StreamingShuffleSource)
   extends ShuffleWriter[K, V] with Logging {
 
@@ -122,6 +129,15 @@ private[spark] class StreamingShuffleWriter[K, V](
   // MapOutputTracker locates streaming outputs exactly as for sort-based shuffle (mirrors
   // SortShuffleWriter L39).
   private val blockManager = env.blockManager
+
+  // This map task's partition index in its stage (== context.partitionId()). Carried with every
+  // emitted block so the reader can attribute coverage and populate FetchFailedException for the
+  // right producer, matching SortShuffleWriter's use of the map index for output location.
+  private val mapIndex: Int = context.partitionId()
+
+  // This producer's block-manager address, advertised in the MapStatus and carried with each block
+  // so the reader can populate FetchFailedException for the right producer on invalidation.
+  private val bmAddress: BlockManagerId = blockManager.shuffleServerId
 
   // Coexistence (serialization): blocks are wrapped with the EXISTING SerializerManager so the
   // compression/encryption applied here EXACTLY mirrors the unwrap the StreamingShuffleReader does
@@ -157,9 +173,14 @@ private[spark] class StreamingShuffleWriter[K, V](
   // A null entry means the partition currently has no open buffer. Touched only by the task thread.
   private val buffers = new Array[PartitionBuffer](numPartitions)
 
-  // Tracks which partitions have bytes registered with the MemorySpillManager so stop() can release
-  // exactly those back to the MemoryManager (zero leaks) without scanning unrelated keys.
-  private val registeredPartitions = new Array[Boolean](numPartitions)
+  // Monotonic per-partition block sequence number; combined with (shuffleId, mapId, partitionId) it
+  // forms the addressable BlockKey so every emitted block is uniquely identifiable for delivery,
+  // acknowledgment, and retransmission.
+  private val blockSeq = new Array[Long](numPartitions)
+
+  // Count of blocks emitted per reduce partition; reported to the exchange via completeMap so the
+  // reader can verify it has received every expected block before completing (no truncated reads).
+  private val blockCounts = new Array[Long](numPartitions)
 
   // Bytes emitted per reduce partition; returned by getPartitionLengths() and put in MapStatus.
   private val partitionLengths = new Array[Long](numPartitions)
@@ -221,44 +242,53 @@ private[spark] class StreamingShuffleWriter[K, V](
       partitionId += 1
     }
     writeMetrics.incWriteTime(System.nanoTime() - writeStartNanos)
+    // Coexistence (coverage): tell the exchange this map finished and how many blocks it sent per
+    // reduce partition, so each reader verifies block coverage before completing -- there is no
+    // unconditional end-of-stream marker that could let a truncated read look like success.
+    exchange.completeMap(shuffleId, mapId, mapIndex, blockCounts.clone())
     // Coexistence (output discovery): emit a STANDARD MapStatus via the `object MapStatus` factory
     // (MapStatus is a sealed trait, so `new` is impossible/incorrect). This keeps the UNMODIFIED
     // MapOutputTracker and DAG scheduler locating streaming outputs EXACTLY as for sort-based
     // shuffle -- the streaming engine changes how bytes move, never how outputs are discovered.
-    mapStatus =
-      MapStatus(blockManager.shuffleServerId, partitionLengths, mapId, aggregatedChecksum)
+    mapStatus = MapStatus(bmAddress, partitionLengths, mapId, aggregatedChecksum)
   }
 
   /**
    * Closes this writer, returning the [[MapStatus]] on success. Idempotent (mirrors
-   * `SortShuffleWriter`): the `finally` block always releases buffers so nothing leaks even when
-   * the map task calls stop(true) and then stop(false) on a later exception.
+   * `SortShuffleWriter`): map tasks may call stop(true) and then stop(false) on a later exception,
+   * so the body runs at most once.
+   *
+   * CRITICAL output lifetime: on SUCCESS the emitted blocks are RETAINED in the spill manager (the
+   * returned [[MapStatus]] advertises them to reducers, which reclaim them on ack), so we
+   * must NOT release them here. On FAILURE we revert metrics, notify readers, and free every block
+   * this map registered -- separating failure cleanup from successful output lifetime.
    */
   override def stop(success: Boolean): Option[MapStatus] = {
-    try {
-      if (stopping) {
-        return None
-      }
+    if (stopping) {
+      None
+    } else {
       stopping = true
       if (success) {
+        // Success: outputs remain in the spill manager until consumers acknowledge them (via the
+        // exchange) or the manager is torn down. Releasing here would delete advertised outputs.
         Option(mapStatus)
       } else {
-        // Revert buffered write metrics so a failed task does not over-report bytes/records.
-        if (totalBytesWritten > 0L) {
-          writeMetrics.decBytesWritten(totalBytesWritten)
-        }
-        if (totalRecordsWritten > 0L) {
-          writeMetrics.decRecordsWritten(totalRecordsWritten)
+        // Failure cleanup, charged to shuffle write time like SortShuffleWriter L106-108.
+        val cleanupStartNanos = System.nanoTime()
+        try {
+          // Revert buffered write metrics so a failed task does not over-report bytes/records.
+          if (totalBytesWritten > 0L) {
+            writeMetrics.decBytesWritten(totalBytesWritten)
+          }
+          if (totalRecordsWritten > 0L) {
+            writeMetrics.decRecordsWritten(totalRecordsWritten)
+          }
+          abortOnFailure()
+        } finally {
+          writeMetrics.incWriteTime(System.nanoTime() - cleanupStartNanos)
         }
         None
       }
-    } finally {
-      // Always clean up: release all per-partition buffers back to the MemoryManager and close open
-      // streams (zero leaks). The cleanup duration is charged to shuffle write time, mirroring
-      // SortShuffleWriter L106-108.
-      val cleanupStartNanos = System.nanoTime()
-      releaseAllBuffers()
-      writeMetrics.incWriteTime(System.nanoTime() - cleanupStartNanos)
     }
   }
 
@@ -304,24 +334,61 @@ private[spark] class StreamingShuffleWriter[K, V](
     }
   }
 
-  // Emit a single finalized block for `partitionId`: compute its per-block CRC32C with the EXISTING
-  // checksum facility, register the bytes with the spill manager (memory accounting + spill via the
-  // existing MemoryManager), pace emission through the token-bucket limiter, feed producer
-  // throughput to the heartbeat loop, and update partition length and write metrics.
+  // Emit a single finalized block for `partitionId` over the streaming data path. Order matters for
+  // correctness: NOTHING is published or accounted unless the block is fully admitted, so an
+  // oversize record, a sustained-slow-consumer fallback, or a task interruption aborts the block
+  // cleanly with no partial state and no advertised-but-missing output.
   private def emitBlock(partitionId: Int, bytes: Array[Byte], records: Long): Unit = {
     val numBytes = bytes.length.toLong
+    // Hard 2MB cap (MAJOR): a single record whose serialized block exceeds the pipelined cap cannot
+    // be split into <=2MB blocks. Rather than emit an oversized streaming block, signal fallback to
+    // sort-based shuffle (the manager composes SortShuffleManager for exactly this case).
+    if (records <= 1L && numBytes > BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES) {
+      throw new StreamingShuffleFallbackException(
+        s"Streaming shuffle record for shuffle $shuffleId partition $partitionId serialized to " +
+          s"$numBytes bytes, over the ${BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES}-byte " +
+          "pipelined block cap and cannot be split; falling back to sort-based shuffle")
+    }
     // Coexistence (integrity): compute the block checksum with the EXISTING ShuffleChecksumHelper
     // (CRC32C when so configured) over the EXACT bytes the reader validates -- the same facility
     // sort-based shuffle uses; no new checksum implementation is introduced.
     val checksum: Checksum = ShuffleChecksumHelper.getChecksumByAlgorithm(checksumAlgorithm)
     checksum.update(bytes, 0, bytes.length)
-    aggregatedChecksum += checksum.getValue
-    // Memory accounting + spill go through the shared MemorySpillManager, which reserves/releases
-    // bytes via the EXISTING MemoryManager. A false result means the budget is exhausted and a
-    // spill was scheduled, so we record a (memory) backpressure event and let the limiter pace
-    // the producer.
-    val granted = spillManager.register(shuffleId, mapId, partitionId, bytes)
-    registeredPartitions(partitionId) = true
+    val checksumValue = checksum.getValue
+    // Flow control BEFORE emit: a sustained consumer slowdown (the >60s, 2x-slower signal) means
+    // streaming can no longer keep up, so fall back to sort rather than emit into a stalled path.
+    if (backpressure.shouldFallback) {
+      throw new StreamingShuffleFallbackException(
+        s"Streaming shuffle consumer is sustained-slow for shuffle $shuffleId; falling back to " +
+          "sort-based shuffle")
+    }
+    // Pace emission through the shared token-bucket limiter, which also honors the producer-pause
+    // and fallback signals. A false return means the block was NOT admitted: distinguish a task
+    // interruption (abort the write) from a terminal backpressure/pause (fall back to sort). In
+    // either case we publish nothing and update no metrics, so an unadmitted block is never
+    // advertised as written (MAJOR interruption fix).
+    if (!backpressure.acquireBlocking(numBytes)) {
+      if (Thread.currentThread().isInterrupted) {
+        throw new IOException(
+          s"Streaming shuffle producer interrupted while pacing a $numBytes-byte block for " +
+            s"shuffle $shuffleId partition $partitionId")
+      } else {
+        throw new StreamingShuffleFallbackException(
+          s"Streaming shuffle could not admit a $numBytes-byte block for shuffle $shuffleId " +
+            "within the backpressure deadline; falling back to sort-based shuffle")
+      }
+    }
+    // Admitted: assign the block's sequence number and publish it over the in-process path. The
+    // exchange registers the bytes with the spill manager (memory accounting + spill via the
+    // EXISTING MemoryManager) and routes them to the owning reducer; a false return is a memory
+    // backpressure hint (the block is still stored and routed), recorded as a backpressure event.
+    val seq = blockSeq(partitionId)
+    blockSeq(partitionId) = seq + 1L
+    val key = MemorySpillManager.BlockKey(shuffleId, mapId, partitionId, seq)
+    val meta = StreamingBlockExchange.BlockMeta(
+      key, bmAddress, ShuffleBlockId(shuffleId, mapId, partitionId), mapIndex, checksumValue,
+      numBytes)
+    val granted = exchange.publishBlock(meta, bytes)
     if (!granted) {
       metricsSource.incBackpressureEvents()
       if (debug) {
@@ -329,16 +396,12 @@ private[spark] class StreamingShuffleWriter[K, V](
           s"$partitionId; spill scheduled, throttling producer")
       }
     }
-    // Coexistence (transport): blocks are pipelined to consumers over the EXISTING transport,
-    // through the same block-transfer/SparkEnv plumbing the rest of the shuffle stack uses (the
-    // MapStatus published in write() advertises their location). We add no new transport stack;
-    // emission is merely paced here by the shared token-bucket limiter (a no-op when unlimited).
-    if (!backpressure.acquireBlocking(numBytes) && debug) {
-      logDebug(s"Streaming shuffle producer interrupted while pacing a $numBytes-byte block")
-    }
     // Feed producer throughput so the heartbeat loop can compare it against consumer throughput and
     // trigger graceful fallback to sort-based shuffle on a sustained consumer slowdown.
     backpressure.recordProducerProgress(numBytes)
+    // Account the admitted block exactly once, AFTER it has been published.
+    aggregatedChecksum += checksumValue
+    blockCounts(partitionId) += 1L
     partitionLengths(partitionId) += numBytes
     totalBytesWritten += numBytes
     totalRecordsWritten += records
@@ -358,11 +421,12 @@ private[spark] class StreamingShuffleWriter[K, V](
     math.max(MIN_BLOCK_FLUSH_BYTES, capped.toLong)
   }
 
-  // Releases every per-partition buffer back to the MemoryManager (via the spill manager) and
-  // closes every open serialization stream. Idempotent: guarded by `released` so repeated stop()
-  // calls clean up exactly once. This guarantees zero buffer-memory leaks on success, failure, or
-  // crash.
-  private def releaseAllBuffers(): Unit = {
+  // Failure cleanup (idempotent via `released`): close every open serialization stream, drop every
+  // per-partition buffer, free ALL of this map's streaming blocks from the spill manager in one
+  // shot (memory + any spill files), and tell readers this producer failed so they invalidate
+  // partial reads and let the EXISTING FetchFailedException path recompute the upstream stage. This
+  // runs ONLY on stop(success = false); successful output is retained until consumers ack it.
+  private def abortOnFailure(): Unit = {
     if (!released) {
       released = true
       var partitionId = 0
@@ -372,14 +436,17 @@ private[spark] class StreamingShuffleWriter[K, V](
           closeQuietly(buffer)
           buffers(partitionId) = null
         }
-        // Return bytes registered for this partition to the MemoryManager; unregister is a no-op
-        // for partitions that were never registered, so this never double-frees.
-        if (registeredPartitions(partitionId)) {
-          spillManager.unregister(shuffleId, mapId, partitionId)
-          registeredPartitions(partitionId) = false
-        }
         partitionId += 1
       }
+      // One call frees memory and deletes any spill files for every block this map registered, so
+      // there is no buffer-memory or disk leak on failure.
+      spillManager.unregisterMap(shuffleId, mapId)
+      // Tell any waiting readers this producer's output is gone; they atomically invalidate partial
+      // reads and throw FetchFailedException, which the unmodified scheduler turns into upstream
+      // stage recomputation -- preserving the lineage/fault-recovery model with zero data loss.
+      exchange.producerFailed(shuffleId, mapId, mapIndex, bmAddress,
+        s"Streaming shuffle map $mapId (index $mapIndex) for shuffle $shuffleId failed before " +
+          "completion", null)
     }
   }
 
@@ -435,3 +502,17 @@ private[spark] object StreamingShuffleWriter {
   /** Floor for the per-partition block-flush threshold so a tiny budget still makes progress. */
   private val MIN_BLOCK_FLUSH_BYTES: Long = 1024L
 }
+
+/**
+ * Signals that a record/block cannot be emitted over the streaming data path and the shuffle must
+ * fall back to the sort-based engine. The streaming writer throws this for an unsplittable record
+ * that exceeds the 2MB pipelined block cap, or when the backpressure protocol reports a terminal
+ * fallback condition (a sustained-slow consumer or an admission deadline that is not an interrupt).
+ *
+ * Coexistence: at this checkpoint the exception propagates and the task fails, so the unmodified
+ * scheduler recomputes the stage; a later checkpoint's `StreamingShuffleManager` catches it and
+ * re-runs the map through the composed `SortShuffleManager`, realizing graceful degradation without
+ * touching the scheduler or the sort path.
+ */
+private[spark] class StreamingShuffleFallbackException(message: String)
+  extends SparkException(message)

@@ -18,16 +18,19 @@
 package org.apache.spark.shuffle.streaming
 
 import java.io.ByteArrayInputStream
-import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, LinkedBlockingQueue, Semaphore, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.Checksum
 
+import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import org.apache.spark._
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
-import org.apache.spark.storage.{BlockId, BlockManagerId}
+import org.apache.spark.shuffle.streaming.StreamingBlockExchange.{BlockMeta, StreamingBlockConsumer}
+import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.CompletionIterator
 import org.apache.spark.util.collection.ExternalSorter
 
@@ -46,35 +49,41 @@ import org.apache.spark.util.collection.ExternalSorter
  *     polling and blocking happen inside the returned iterator (the inner
  *     `StreamingShuffleRecordIterator`), so unchanged call sites observe exactly the same contract
  *     as the sort-based reader: `read(): Iterator[Product2[K, C]]`.
- *  2. In-progress block requests over the EXISTING transport: this reader owns a thread-safe inbox
- *     and mirrors the proven `ShuffleBlockFetcherIterator` design, where a transport response
- *     handler enqueues results and the consuming iterator polls them. The streaming response
- *     handler -- wired by `StreamingShuffleManager` on the EXISTING
- *     `org.apache.spark.network.TransportContext` (reuse only; no transport class is modified) --
- *     delivers each block, producer failure, and end-of-stream marker via the package-private
- *     callbacks below. Consumer-to-producer heartbeats (via the shared [[BackpressureProtocol]])
- *     apply flow control and double as the signal that pulls the producer to send/resend blocks.
- *  3. CRC32C integrity with retransmission: every received block is validated with the EXISTING
- *     [[ShuffleChecksumHelper]] (CRC32C by default). A corrupt block is retransmitted with
- *     exponential backoff (start 1s, doubling) up to [[BackpressureProtocol.MAX_RETRY_ATTEMPTS]]
- *     attempts before the read is invalidated.
+ *  2. In-progress block requests via the [[StreamingBlockExchange]]: this reader subscribes to the
+ *     exchange (the in-process producer->consumer data path) and mirrors the proven
+ *     `ShuffleBlockFetcherIterator` design, where a delivery callback enqueues results and the
+ *     consuming iterator polls them. The exchange delivers each block, per-map completion-coverage
+ *     signal, and producer failure through the [[StreamingBlockConsumer]] callbacks below. The
+ *     in-process exchange is the checkpoint realization of the data path; a later checkpoint backs
+ *     it with the EXISTING `org.apache.spark.network.TransportContext` (reuse only; no transport
+ *     class is modified). Consumer-to-producer heartbeats (via the shared [[BackpressureProtocol]])
+ *     apply flow control. The inbox is BOUNDED by message count and block bytes, so a fast producer
+ *     blocks in the delivery callback (backpressure) rather than accumulating unbounded arrays.
+ *  3. CRC32C integrity with block-specific retransmission: every received block is validated with
+ *     the EXISTING [[ShuffleChecksumHelper]] (CRC32C). A corrupt block is re-requested by
+ *     its addressable key via [[StreamingBlockExchange.requestResend]] with exponential backoff
+ *     (start 1s, doubling) up to [[BackpressureProtocol.MAX_RETRY_ATTEMPTS]] attempts before the
+ *     read is invalidated.
  *  4. Consumed-buffer acknowledgment: each validated block is acknowledged through
- *     [[BackpressureProtocol.recordConsumerProgress]], which drives `MemorySpillManager` buffer
- *     reclamation on the writer side within the mandated 100ms.
- *  5. Atomic partial-read invalidation (SPARK-19276): on producer timeout, producer failure, or
- *     unrecoverable corruption, the reader throws the EXISTING [[FetchFailedException]] in a single
- *     construct-and-throw expression. The UNMODIFIED DAG scheduler converts this into upstream
- *     stage recomputation, preserving the existing lineage/fault-recovery model. This class never
- *     touches the scheduler. No partially-applied state escapes the iterator, guaranteeing zero
- *     data loss across producer crashes, consumer failures, and network partitions.
+ *     [[StreamingBlockExchange.ack]] (which drives `MemorySpillManager` buffer reclamation on the
+ *     writer side within the mandated 100ms) and [[BackpressureProtocol.recordConsumerProgress]].
+ *  5. Atomic partial-read invalidation (SPARK-19276): on producer timeout BEFORE full per-map
+ *     coverage, producer failure, or unrecoverable corruption, the reader throws the EXISTING
+ *     [[FetchFailedException]] in a single construct-and-throw expression. Completion is derived
+ *     from per-map coverage (every expected map completed AND every block it reported received), so
+ *     a truncated stream can NEVER be reported as success. The UNMODIFIED scheduler converts the
+ *     exception into upstream stage recomputation, preserving the existing lineage/fault-recovery
+ *     model. This class never touches the scheduler. No partially-applied state escapes the
+ *     iterator, guaranteeing zero data loss across producer crashes, consumer failures, and network
+ *     partitions.
  *
  * Coexistence strategy: this reader is instantiated ONLY on the streaming path. The default
  * `SortShuffleManager` fallback never constructs it, so the sort-based shuffle carries zero
  * streaming overhead. Being `private[spark]` and confined to the streaming package enforces the
  * zero-cross-contamination rule: existing components neither import nor depend on this class.
  *
- * Threading: the inbox is the only cross-thread structure (a thread-safe
- * [[java.util.concurrent.LinkedBlockingQueue]] populated by the transport handler thread and
+ * Threading: the inbox is the only cross-thread structure (a BOUNDED thread-safe
+ * [[java.util.concurrent.LinkedBlockingQueue]] populated by the exchange's delivery threads and
  * drained by the single task thread that consumes the returned iterator). All other iterator state
  * is touched solely by that task thread. Verbose logging is gated behind
  * `spark.shuffle.streaming.debug` to keep per-executor log volume under the mandated 10MB/hour.
@@ -92,6 +101,16 @@ import org.apache.spark.util.collection.ExternalSorter
  * @param backpressure the shared consumer-to-producer flow-control/heartbeat protocol
  * @param metricsSource the shared JMX metrics source whose `partialReadInvalidations` counter is
  *                      incremented on every atomic partial-read invalidation
+ * @param exchange the in-process producer->consumer data path this reader subscribes to; it routes
+ *                 writer-emitted blocks to [[onBlockReceived]], map-completion coverage to
+ *                 [[onMapComplete]], and producer failures to [[onProducerFailed]], and carries
+ *                 acknowledgments ([[StreamingBlockExchange.ack]]) and block-specific
+ *                 retransmission requests ([[StreamingBlockExchange.requestResend]]) back
+ * @param inboxCapacity the maximum number of undelivered messages buffered in the inbox before
+ *                      producer callbacks block (count bound; see also `maxInboxBytes`)
+ * @param maxInboxBytes the maximum number of undelivered block bytes buffered in the inbox before
+ *                      producer callbacks block (byte bound; a single block larger than this is
+ *                      still admitted alone so the reader never deadlocks)
  * @tparam K the type of the keys being read
  * @tparam C the type of the combined values produced on the reduce side
  */
@@ -105,8 +124,11 @@ private[spark] class StreamingShuffleReader[K, C](
     readMetrics: ShuffleReadMetricsReporter,
     conf: SparkConf,
     backpressure: BackpressureProtocol,
-    metricsSource: StreamingShuffleSource)
-  extends ShuffleReader[K, C] with Logging {
+    metricsSource: StreamingShuffleSource,
+    exchange: StreamingBlockExchange,
+    inboxCapacity: Int = StreamingShuffleReader.DefaultInboxCapacity,
+    maxInboxBytes: Int = StreamingShuffleReader.DefaultMaxInboxBytes)
+  extends ShuffleReader[K, C] with StreamingBlockConsumer with Logging {
 
   import StreamingShuffleReader._
 
@@ -125,64 +147,128 @@ private[spark] class StreamingShuffleReader[K, C](
   // existing shuffle checksum facility rather than introducing a new checksum implementation.
   private val checksumAlgorithm: String = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
 
-  // Consumer-side receive buffer for in-progress blocks streamed from producers. The streaming
-  // transport response handler (owned by StreamingShuffleManager, running on the EXISTING
-  // TransportContext) enqueues messages here through the package-private callbacks below; the
-  // returned iterator drains them on the task thread. This mirrors the listener-enqueues /
-  // iterator-polls structure of the existing ShuffleBlockFetcherIterator.
-  private val inbox = new LinkedBlockingQueue[StreamingBlockMessage]()
+  // Consumer-side receive buffer for in-progress blocks streamed from producers. The
+  // StreamingBlockExchange (the in-process producer->consumer data path; reused at a later
+  // checkpoint behind the EXISTING TransportContext) delivers blocks/coverage/failures through the
+  // StreamingBlockConsumer callbacks below; the returned iterator drains them on the task thread.
+  // This mirrors the listener-enqueues / iterator-polls structure of ShuffleBlockFetcherIterator.
+  //
+  // BOUNDED for memory safety + backpressure (R4): the inbox is bounded by BOTH message count
+  // (`inboxCapacity`) and buffered block bytes (`maxInboxBytes`). A producer callback that would
+  // exceed either bound BLOCKS until the consumer drains -- and because publishBlock invokes the
+  // callback on the producer's own thread, that blocking IS the end-to-end backpressure that
+  // throttles a fast producer instead of letting unbounded byte arrays accumulate and risk OOM.
+  private val inbox = new LinkedBlockingQueue[StreamingBlockMessage](math.max(1, inboxCapacity))
+
+  // Byte budget guarding the inbox. A block acquires min(size, maxInboxBytes) permits before being
+  // enqueued and releases them when drained, so buffered bytes stay bounded while a single block
+  // larger than the whole budget is still admitted alone (it acquires every permit) rather than
+  // deadlocking forever.
+  private val inboxBytes = new Semaphore(math.max(1, maxInboxBytes))
+
+  // Re-entrant resend channel. requestResend re-delivers a block by calling onBlockReceived on THIS
+  // (the consumer) thread; routing such deliveries here -- not the bounded inbox -- means the
+  // consumer never blocks on its own inbox while servicing a retransmission (deadlock-free). It is
+  // bounded in practice by the per-block retry budget, since only the iterator thread requests it.
+  private val resendInbox = new ConcurrentLinkedQueue[BlockChunk]()
+
+  // The task thread that drains the iterator, captured on first poll. Used only to distinguish a
+  // re-entrant resend delivery (this thread) from a producer-thread delivery (any other thread).
+  private val consumerThread = new AtomicReference[Thread]()
+
+  // Number of producer map tasks this reduce task expects an `onMapComplete` from. Completion (no
+  // truncated read) requires a completion signal from EVERY one of these maps, plus every block
+  // each of them reports having emitted for this reader's partition range (R1).
+  private val expectedMapCount: Int = math.max(0, endMapIndex - startMapIndex)
 
   if (debug) {
     logDebug(s"StreamingShuffleReader created for shuffle $shuffleId partitions " +
-      s"[$startPartition, $endPartition) maps [$startMapIndex, $endMapIndex)")
+      s"[$startPartition, $endPartition) maps [$startMapIndex, $endMapIndex); inbox bound " +
+      s"$inboxCapacity msgs / $maxInboxBytes bytes")
   }
 
+  // Subscribe to the exchange as the LAST construction step (every field above is initialized, so
+  // publishing `this` is safe). The exchange immediately replays any blocks/coverage that arrived
+  // before this reader subscribed, and routes all future ones here.
+  exchange.registerReader(
+    shuffleId, startMapIndex, endMapIndex, startPartition, endPartition, this)
+
+  // Unsubscribe on task completion (success/failure/cancel) so the exchange never retains
+  // routing state for a finished reduce task. Reuses the EXISTING TaskContext lifecycle; no
+  // scheduler or task code is modified.
+  context.addTaskCompletionListener[Unit](_ => exchange.unregisterReader(shuffleId, this))
+
   // ============================================================================================
-  // Transport integration point (REUSE ONLY).
+  // Data-path integration point (REUSE ONLY).
   //
-  // The streaming response handler owned by `StreamingShuffleManager` invokes these callbacks as
-  // in-progress blocks arrive over the EXISTING `org.apache.spark.network.TransportContext`. They
-  // are the ONLY entry points the transport uses to hand data to this reader, so no existing
-  // transport class is modified. Keeping them package-private confines the streaming wiring to the
-  // streaming package and enforces the zero-cross-contamination rule. The unbounded inbox means
-  // these never block the transport thread.
+  // These StreamingBlockConsumer callbacks are the ONLY entry points the exchange uses
+  // to hand data to this reader. publishBlock/producerFailed invoke them on a PRODUCER thread (so a
+  // full inbox blocks the producer = backpressure); requestResend invokes onBlockReceived on the
+  // CONSUMER thread (routed to the re-entrant resend channel to stay deadlock-free). Keeping them
+  // confined to the streaming package enforces the zero-cross-contamination rule.
   // ============================================================================================
 
   /**
-   * Called by the streaming transport handler when an in-progress block (and its producer-computed
-   * checksum) arrives for this reader.
+   * Delivers an in-progress block (and its metadata, including the producer-computed checksum) to
+   * this reader. On a producer thread this blocks when the bounded inbox is full (backpressure); on
+   * the consumer thread (a resend re-delivery) it routes to the non-blocking resend channel.
    */
-  private[streaming] def onBlockReceived(
-      bmAddress: BlockManagerId,
-      blockId: BlockId,
-      mapId: Long,
-      mapIndex: Int,
-      reduceId: Int,
-      bytes: Array[Byte],
-      checksum: Long): Unit = {
-    inbox.put(BlockChunk(bmAddress, blockId, mapId, mapIndex, reduceId, bytes, checksum))
+  override def onBlockReceived(meta: BlockMeta, bytes: Array[Byte]): Unit = {
+    if (Thread.currentThread() eq consumerThread.get()) {
+      resendInbox.add(BlockChunk(meta, bytes))
+    } else {
+      // Producer thread: acquire the byte budget (blocking) then enqueue (blocking when full),
+      // propagating backpressure to the writer's publishBlock on its own map thread. If interrupted
+      // after acquiring but before enqueue, release the permits so the budget never leaks.
+      val permits = permitsFor(bytes)
+      var acquired = false
+      try {
+        if (permits > 0) {
+          inboxBytes.acquire(permits)
+          acquired = true
+        }
+        inbox.put(BlockChunk(meta, bytes))
+      } catch {
+        case e: InterruptedException =>
+          if (acquired) {
+            inboxBytes.release(permits)
+          }
+          Thread.currentThread().interrupt()
+          throw e
+      }
+    }
   }
 
   /**
-   * Called by the streaming transport handler when a producer crashes or a connection to it is
-   * lost. Drives an atomic partial-read invalidation when the consuming iterator reaches it.
+   * Reports that a producing map finished and how many blocks it emitted per reduce partition, so
+   * the consuming iterator can verify FULL coverage of its partition range before completing (R1).
    */
-  private[streaming] def onProducerFailed(
+  override def onMapComplete(mapId: Long, mapIndex: Int, blockCounts: Array[Long]): Unit = {
+    // Control message: it carries no block bytes, so it bypasses the byte budget and takes only a
+    // count slot. The continuously-draining iterator guarantees it is admitted promptly.
+    inbox.put(MapCompleted(mapId, mapIndex, blockCounts))
+  }
+
+  /**
+   * Reports that a producing map failed; the consuming iterator turns this into an atomic
+   * partial-read invalidation that drives upstream recomputation through `FetchFailedException`.
+   */
+  override def onProducerFailed(
       bmAddress: BlockManagerId,
-      blockId: BlockId,
       mapId: Long,
       mapIndex: Int,
-      reduceId: Int,
       message: String,
       cause: Throwable): Unit = {
-    inbox.put(ProducerFailed(bmAddress, blockId, mapId, mapIndex, reduceId, message, cause))
+    inbox.put(ProducerFailed(bmAddress, mapId, mapIndex, message, cause))
   }
 
-  /**
-   * Called by the streaming transport handler once every expected producer has finished streaming
-   * all of its blocks for this reader's partition range. Cleanly terminates the iterator.
-   */
-  private[streaming] def onStreamComplete(): Unit = inbox.put(EndOfStream)
+  // Byte permits a block of `bytes` consumes in the inbox budget: its size, capped by the whole
+  // budget so an oversize block can still be admitted alone (acquiring every permit) rather than
+  // requesting more than the semaphore can ever grant.
+  private def permitsFor(bytes: Array[Byte]): Int = {
+    val size = if (bytes == null) 0 else bytes.length
+    math.min(math.max(size, 0), math.max(1, maxInboxBytes))
+  }
 
   /** Read the combined key-values for this reduce task. */
   override def read(): Iterator[Product2[K, C]] = {
@@ -262,7 +348,9 @@ private[spark] class StreamingShuffleReader[K, C](
     // Decoded records of the current validated block; refilled on demand from the inbox.
     private var currentRecords: Iterator[(Any, Any)] = Iterator.empty
 
-    // Set once every expected producer has signaled completion (EndOfStream); no more blocks.
+    // Set once FULL coverage is verified -- every map completed AND every block it reported
+    // for this reader's range has been received and validated; only then are there no more
+    // blocks. There is NO unconditional end-of-stream marker, so a truncated stream cannot finish.
     private var finished: Boolean = false
 
     // Producer context of the most recently validated block, used to populate FetchFailedException
@@ -270,6 +358,14 @@ private[spark] class StreamingShuffleReader[K, C](
     private var lastProducerAddress: BlockManagerId = _
     private var lastMapId: Long = -1L
     private var lastMapIndex: Int = -1
+
+    // Coverage tracking (R1), touched only by this single task thread (no synchronization needed).
+    // completedMaps: mapIndex -> number of blocks that map reported emitting for THIS reader's
+    // [startPartition, endPartition) range (via onMapComplete). receivedPerMap: mapIndex -> number
+    // of those blocks actually received and validated so far. The read is complete only when every
+    // expected map has completed and received >= expected for each.
+    private val completedMaps = new mutable.HashMap[Int, Long]()
+    private val receivedPerMap = new mutable.HashMap[Int, Long]()
 
     override def hasNext: Boolean = {
       if (currentRecords.hasNext) {
@@ -287,95 +383,171 @@ private[spark] class StreamingShuffleReader[K, C](
       currentRecords.next()
     }
 
-    // Pull messages from the inbox until a validated block yields records or the stream completes.
+    // Pull messages until a validated block yields records or FULL coverage is verified. A poll
+    // timeout while coverage is still incomplete is a truncated stream and is invalidated (R1).
     private def fillBuffer(): Unit = {
       while (!finished && !currentRecords.hasNext) {
         pollNext() match {
-          case EndOfStream =>
-            finished = true
-          case ProducerFailed(addr, _, mapId, mapIndex, reduceId, message, cause) =>
+          case null =>
+            // Inbox timed out. If full coverage was already verified we are done; otherwise a
+            // producer stalled and this is a truncated read, which we NEVER report as success --
+            // invalidate atomically so the existing FetchFailedException path recomputes upstream.
+            if (isComplete) {
+              finished = true
+            } else {
+              invalidate(lastProducerAddress, lastMapId, lastMapIndex, startPartition,
+                s"Streaming shuffle producer timed out before full coverage (shuffle $shuffleId, " +
+                  s"reduce $startPartition): ${completedMaps.size}/$expectedMapCount " +
+                  "expected maps", null)
+            }
+          case mc: MapCompleted =>
+            noteMapCompleted(mc.mapIndex, mc.blockCounts)
+            if (isComplete) {
+              finished = true
+            }
+          case pf: ProducerFailed =>
             // Producer crash / network partition: invalidate atomically (throws; never returns).
-            invalidate(addr, mapId, mapIndex, reduceId, message, cause)
+            invalidate(pf.bmAddress, pf.mapId, pf.mapIndex, startPartition, pf.message, pf.cause)
           case chunk: BlockChunk =>
             currentRecords = receiveChunk(chunk)
+            // Finish as soon as coverage completes, even with records pending: `finished` only
+            // gates this loop, and hasNext drains `currentRecords` first, so no end-of-read poll
+            // stalls for the producer-timeout deadline.
+            if (isComplete) {
+              finished = true
+            }
         }
       }
     }
 
-    // Block for the next inbox message, applying consumer-to-producer flow control and timing the
-    // wait as fetch-wait time. A poll timeout is treated as a producer timeout and is invalidated.
+    // True once every expected map has reported completion AND every block each reported for this
+    // reader's partition range has been received and validated (R1: no truncated read can satisfy).
+    private def isComplete: Boolean = {
+      completedMaps.size >= expectedMapCount &&
+        completedMaps.forall { case (mapIndex, expected) =>
+          receivedPerMap.getOrElse(mapIndex, 0L) >= expected
+        }
+    }
+
+    // Record a map's completion: sum the blocks it reported for THIS reader's [startPartition,
+    // endPartition) range (index = reduce partition id), guarding the array bounds defensively.
+    private def noteMapCompleted(mapIndex: Int, blockCounts: Array[Long]): Unit = {
+      var expected = 0L
+      if (blockCounts != null) {
+        var p = startPartition
+        val end = math.min(endPartition, blockCounts.length)
+        while (p < end) {
+          expected += blockCounts(p)
+          p += 1
+        }
+      }
+      completedMaps(mapIndex) = expected
+    }
+
+    // Count one received-and-validated block toward this map's coverage.
+    private def noteBlockReceived(mapIndex: Int): Unit = {
+      receivedPerMap(mapIndex) = receivedPerMap.getOrElse(mapIndex, 0L) + 1L
+    }
+
+    // Block for the next message, draining re-entrant resends first (no byte budget), then
+    // the bounded inbox. Returns null on a producer-timeout deadline so the caller can decide,
+    // based on coverage, whether that is normal completion or a truncated read (R1). Releases the
+    // byte budget a drained block held so a producer blocked in onBlockReceived can proceed (R4).
     private def pollNext(): StreamingBlockMessage = {
-      // A consumer heartbeat over the EXISTING transport signals liveness and pulls the producer to
-      // send (or resend) in-progress blocks; this is how the reader "requests" streamed blocks.
-      backpressure.consumerHeartbeat()
-      val startNanos = System.nanoTime()
-      val msg = inbox.poll(ProducerTimeoutMillis, TimeUnit.MILLISECONDS)
-      readMetrics.incFetchWaitTime(elapsedMillis(startNanos))
-      if (msg == null) {
-        // Producer timeout: nothing arrived within the deadline. Invalidate atomically so no
-        // partially-applied state escapes the iterator (zero data loss).
-        invalidate(lastProducerAddress, lastMapId, lastMapIndex, startPartition,
-          s"Streaming shuffle producer timed out (shuffle $shuffleId, reduce $startPartition)",
-          null)
+      consumerThread.compareAndSet(null, Thread.currentThread())
+      val resent = resendInbox.poll()
+      if (resent != null) {
+        resent
       } else {
-        msg
+        // A consumer heartbeat signals liveness and feeds consumer throughput to the flow-control
+        // protocol; this is how the reader paces and "pulls" streamed blocks.
+        backpressure.consumerHeartbeat()
+        val startNanos = System.nanoTime()
+        val msg = inbox.poll(ProducerTimeoutMillis, TimeUnit.MILLISECONDS)
+        readMetrics.incFetchWaitTime(elapsedMillis(startNanos))
+        msg match {
+          case bc: BlockChunk =>
+            inboxBytes.release(permitsFor(bc.bytes))
+            bc
+          case other =>
+            other
+        }
       }
     }
 
-    // Validate a received block's CRC32C; on corruption, request retransmission with exponential
-    // backoff up to the retry budget, then invalidate. On success, record producer context, update
-    // read metrics, acknowledge the consumed bytes, and deserialize into key/value records.
+    // Validate a received block's CRC32C; on corruption, issue a block-specific NACK to resend THIS
+    // exact block over the exchange with backoff up to the retry budget, then invalidate
+    // if it can no longer be retransmitted. On success, count it toward coverage, record producer
+    // context, update read metrics, acknowledge it (driving writer-side reclaim), and deserialize.
     private def receiveChunk(chunk: BlockChunk): Iterator[(Any, Any)] = {
       var current = chunk
       var attempts = 1
       // Coexistence: integrity is verified with the EXISTING ShuffleChecksumHelper (CRC32C), the
       // same facility sort-based shuffle uses; no new checksum implementation is introduced.
-      while (!validateChecksum(current.bytes, current.checksum)) {
+      while (!validateChecksum(current.bytes, current.meta.checksum)) {
         if (attempts >= MaxRetryAttempts) {
           // Unrecoverable corruption after the full retry budget: invalidate atomically.
-          invalidate(current.bmAddress, current.mapId, current.mapIndex, current.reduceId,
-            s"Streaming shuffle block ${current.blockId} failed CRC32C validation after " +
+          invalidate(current.meta.bmAddress, current.meta.mapId, current.meta.mapIndex,
+            current.meta.reduceId,
+            s"Streaming shuffle block ${current.meta.blockId} failed CRC32C validation after " +
               s"$attempts attempts", null)
         }
-        requestRetransmission(current, attempts)
+        // Block-specific NACK (R3): ask the exchange to resend THIS block by its addressable key,
+        // after exponential backoff. If it is no longer retained, the read is unrecoverable.
+        backoffBeforeResend(current.meta, attempts)
+        if (!exchange.requestResend(current.meta)) {
+          invalidate(current.meta.bmAddress, current.meta.mapId, current.meta.mapIndex,
+            current.meta.reduceId,
+            s"Streaming shuffle block ${current.meta.blockId} is corrupt and can no longer be " +
+              s"retransmitted (attempt $attempts)", null)
+        }
         current = awaitRetransmission(current)
         attempts += 1
       }
-      lastProducerAddress = current.bmAddress
-      lastMapId = current.mapId
-      lastMapIndex = current.mapIndex
+      lastProducerAddress = current.meta.bmAddress
+      lastMapId = current.meta.mapId
+      lastMapIndex = current.meta.mapIndex
+      noteBlockReceived(current.meta.mapIndex)
       recordBlockMetrics(current)
-      // Acknowledge consumed bytes back to the producer; this drives MemorySpillManager buffer
-      // reclamation on the writer side within the mandated 100ms of the acknowledgment.
+      // Acknowledge the consumed block over the exchange (R2): this drives MemorySpillManager
+      // .reclaim of the writer-side buffer within the mandated 100ms. The reader holds its OWN copy
+      // of the bytes, so reclaiming the producer-side buffer never affects deserialization below.
+      exchange.ack(current.meta)
       backpressure.recordConsumerProgress(current.bytes.length.toLong)
       deserializeChunk(current)
     }
 
-    // After a corrupt block, wait for the producer to resend it. A failure or end-of-stream while
-    // awaiting the resend is itself an unrecoverable partial read and is invalidated atomically.
+    // After a corrupt block, wait for the resend (delivered via the re-entrant resend channel). A
+    // producer failure, a competing completion, or a producer timeout while awaiting the resend is
+    // itself an unrecoverable partial read and is invalidated atomically.
     private def awaitRetransmission(failed: BlockChunk): BlockChunk = {
       pollNext() match {
         case chunk: BlockChunk =>
           chunk
-        case ProducerFailed(addr, _, mapId, mapIndex, reduceId, message, cause) =>
-          invalidate(addr, mapId, mapIndex, reduceId, message, cause)
-        case EndOfStream =>
-          invalidate(failed.bmAddress, failed.mapId, failed.mapIndex, failed.reduceId,
-            s"Streaming shuffle stream ended before block ${failed.blockId} could be " +
-              "retransmitted successfully", null)
+        case pf: ProducerFailed =>
+          invalidate(pf.bmAddress, pf.mapId, pf.mapIndex, startPartition, pf.message, pf.cause)
+        case mc: MapCompleted =>
+          invalidate(failed.meta.bmAddress, failed.meta.mapId, failed.meta.mapIndex,
+            failed.meta.reduceId,
+            s"Streaming shuffle map ${mc.mapId} completed before corrupt block " +
+              s"${failed.meta.blockId} could be retransmitted", null)
+        case _ =>
+          invalidate(failed.meta.bmAddress, failed.meta.mapId, failed.meta.mapIndex,
+            failed.meta.reduceId,
+            s"Streaming shuffle producer timed out before corrupt block ${failed.meta.blockId} " +
+              "could be retransmitted", null)
       }
     }
   }
 
-  // Issue a retransmission request for a corrupt block with exponential backoff (start 1s,
-  // doubling, capped). The request is conveyed to the producer through the consumer-to-producer
-  // flow-control channel over the EXISTING transport; the heartbeat both keeps the connection alive
-  // and pulls the producer to resend the un-acknowledged (NACKed) block.
-  private def requestRetransmission(chunk: BlockChunk, attempt: Int): Unit = {
+  // Exponential backoff before a block-specific resend request (start 1s, doubling, capped). A
+  // consumer heartbeat keeps flow-control state fresh across the wait. The actual NACK is issued by
+  // the caller via `exchange.requestResend`, which re-delivers the retained block by its key.
+  private def backoffBeforeResend(meta: BlockMeta, attempt: Int): Unit = {
     val backoff = backoffMillis(attempt)
     if (debug) {
-      logDebug(s"Streaming shuffle block ${chunk.blockId} failed CRC32C validation; requesting " +
-        s"retransmission (attempt $attempt of $MaxRetryAttempts) after ${backoff}ms backoff")
+      logDebug(s"Streaming shuffle block ${meta.blockId} failed CRC32C validation; requesting " +
+        s"resend (attempt $attempt of $MaxRetryAttempts) after ${backoff}ms backoff")
     }
     sleepInterruptibly(backoff)
     backpressure.consumerHeartbeat()
@@ -423,7 +595,7 @@ private[spark] class StreamingShuffleReader[K, C](
   // counters based on the producer address.
   private def recordBlockMetrics(chunk: BlockChunk): Unit = {
     val size = chunk.bytes.length.toLong
-    if (isLocal(chunk.bmAddress)) {
+    if (isLocal(chunk.meta.bmAddress)) {
       readMetrics.incLocalBlocksFetched(1L)
       readMetrics.incLocalBytesRead(size)
     } else {
@@ -440,11 +612,11 @@ private[spark] class StreamingShuffleReader[K, C](
     val wrapped = Option(SparkEnv.get) match {
       case Some(env) =>
         try {
-          env.serializerManager.wrapStream(chunk.blockId, rawStream)
+          env.serializerManager.wrapStream(chunk.meta.blockId, rawStream)
         } catch {
           case NonFatal(e) =>
             if (debug) {
-              logDebug(s"wrapStream unavailable for ${chunk.blockId}; using raw stream", e)
+              logDebug(s"wrapStream unavailable for ${chunk.meta.blockId}; using raw stream", e)
             }
             rawStream
         }
@@ -512,54 +684,62 @@ private[spark] object StreamingShuffleReader {
     (BackpressureProtocol.HEARTBEAT_INTERVAL_SECONDS +
       BackpressureProtocol.CONNECT_TIMEOUT_SECONDS) * 1000L
 
+  /** Default maximum number of undelivered messages buffered in a reader's inbox (count bound). */
+  private[streaming] val DefaultInboxCapacity: Int = 128
+
   /**
-   * A message delivered to a [[StreamingShuffleReader]] by the streaming transport handler over the
-   * EXISTING transport. Sealed so the consuming iterator handles every case exhaustively.
+   * Default maximum number of undelivered block bytes buffered in a reader's inbox (byte bound),
+   * 64MB -- headroom for many in-flight <=2MB pipelined blocks while still bounding memory (R4).
+   */
+  private[streaming] val DefaultMaxInboxBytes: Int = 64 * 1024 * 1024
+
+  /**
+   * A message delivered to a [[StreamingShuffleReader]] by the [[StreamingBlockExchange]] through
+   * its [[StreamingBlockExchange.StreamingBlockConsumer]] callbacks. Sealed so the consuming
+   * iterator handles every case exhaustively. There is deliberately NO end-of-stream message:
+   * completion is derived from per-map coverage so a truncated stream can never finish (R1).
    */
   private[spark] sealed trait StreamingBlockMessage
 
   /**
-   * An in-progress block streamed from a producer, carrying the producer-computed checksum so the
-   * reader can validate integrity and request retransmission on corruption.
+   * An in-progress block streamed from a producer, paired with its end-to-end [[BlockMeta]] (which
+   * carries the addressable block key, producer address, block id, and producer-computed checksum)
+   * so the reader can validate integrity and request a block-specific resend on corruption.
    *
-   * @param bmAddress the producer's [[BlockManagerId]] (used to populate [[FetchFailedException]])
-   * @param blockId the shuffle block id (used to unwrap the stream and for diagnostics)
-   * @param mapId the producing map task id
-   * @param mapIndex the producing map task index
-   * @param reduceId the reduce partition id
+   * @param meta the block metadata carried end to end (key/address/blockId/checksum/size)
    * @param bytes the (possibly compressed/encrypted) serialized block bytes
-   * @param checksum the producer-computed checksum (CRC32C by default) of `bytes`
    */
   private[spark] case class BlockChunk(
-      bmAddress: BlockManagerId,
-      blockId: BlockId,
+      meta: BlockMeta,
+      bytes: Array[Byte]) extends StreamingBlockMessage
+
+  /**
+   * Signals that a producing map task finished, reporting how many blocks it emitted for each
+   * reduce partition (index = reduce partition id), so the reader can verify full coverage (R1).
+   *
+   * @param mapId the completed map task id
+   * @param mapIndex the completed map task index
+   * @param blockCounts per-reduce-partition block counts emitted by this map
+   */
+  private[spark] case class MapCompleted(
       mapId: Long,
       mapIndex: Int,
-      reduceId: Int,
-      bytes: Array[Byte],
-      checksum: Long) extends StreamingBlockMessage
+      blockCounts: Array[Long]) extends StreamingBlockMessage
 
   /**
    * Signals that a producer crashed or its connection was lost; the consuming iterator turns this
    * into an atomic partial-read invalidation that drives upstream recomputation.
    *
    * @param bmAddress the failed producer's [[BlockManagerId]] (may be null if unknown)
-   * @param blockId the in-flight shuffle block id (may be null if unknown)
    * @param mapId the producing map task id
    * @param mapIndex the producing map task index
-   * @param reduceId the reduce partition id
    * @param message a human-readable description of the failure
    * @param cause the underlying cause, or null
    */
   private[spark] case class ProducerFailed(
       bmAddress: BlockManagerId,
-      blockId: BlockId,
       mapId: Long,
       mapIndex: Int,
-      reduceId: Int,
       message: String,
       cause: Throwable) extends StreamingBlockMessage
-
-  /** Signals that every expected producer has finished streaming; terminates the iterator. */
-  private[spark] case object EndOfStream extends StreamingBlockMessage
 }

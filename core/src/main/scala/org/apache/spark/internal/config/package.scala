@@ -1768,9 +1768,11 @@ package object config {
     ConfigBuilder("spark.shuffle.streaming.maxBandwidthMBps")
       .doc("Per-executor streaming-shuffle bandwidth limit in MB/s for the token-bucket rate " +
         "limiter (refill = maxBandwidthMBps / numConcurrentShuffles). A value of 0 means " +
-        "unlimited (no rate limiting).")
+        "unlimited (no rate limiting). Negative values are rejected.")
       .version("4.1.0")
       .intConf
+      .checkValue(_ >= 0, "spark.shuffle.streaming.maxBandwidthMBps must be non-negative; " +
+        "use 0 for unlimited (no rate limiting)")
       .createWithDefault(0)
 
   private[spark] val STREAMING_SHUFFLE_DEBUG =

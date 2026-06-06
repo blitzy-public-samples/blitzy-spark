@@ -286,18 +286,28 @@ number of cores in your clusters.
 
 ## Streaming Shuffle
 
-Spark 4.1.0 introduces an opt-in *streaming shuffle* engine that streams intermediate shuffle data
-directly from map (producer) tasks to reduce (consumer) tasks through bounded in-memory buffers,
+Spark 4.1.0 introduces an opt-in *streaming shuffle* engine, designed to stream intermediate shuffle
+data directly from map (producer) tasks to reduce (consumer) tasks through bounded in-memory buffers,
 rather than first materializing it to disk as the default sort-based shuffle does. For shuffle-bound,
 latency-sensitive workloads — typically those moving 10GB or more of shuffle data across 100 or more
-partitions — this can reduce end-to-end shuffle latency by 30-50%. CPU-bound workloads see a smaller
-benefit (around 5-10%).
+partitions — it targets a 30-50% reduction in end-to-end shuffle latency. CPU-bound workloads are
+expected to see a smaller benefit (around 5-10%).
 
-Streaming shuffle is **disabled by default** and is activated only when you set both
-`spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true`. It **coexists with, and
-never replaces, the default sort-based shuffle**: the streaming manager composes a sort-based shuffle
-manager and automatically falls back to it for memory-bound workloads or whenever a fallback
-condition fires, so there is no regression risk for jobs that do not benefit from streaming.
+**Availability.** This release ships the streaming-shuffle data-plane components and their
+configuration properties, but the cluster-wide activation surface — selecting streaming as the
+shuffle manager via `spark.shuffle.manager=streaming` and the manager-driven automatic fallback to
+sort-based shuffle — is staged for a later checkpoint. Until that manager lands,
+`spark.shuffle.manager=streaming` is not selectable and Spark continues to use the default sort-based
+shuffle, so the tuning advice below applies once streaming can be activated. See the
+[Streaming Shuffle](streaming-shuffle.html) guide's availability note for the precise breakdown of
+what is implemented now versus planned.
+
+When streaming is activated (in that later checkpoint) it is **disabled by default** and is turned on
+only by setting both `spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true`. It
+is designed to **coexist with, and never replace, the default sort-based shuffle**: the streaming
+manager composes a sort-based shuffle manager and automatically falls back to it for memory-bound
+workloads or whenever a fallback condition fires, so jobs that do not benefit from streaming incur no
+regression.
 
 When tuning streaming shuffle, consider the following properties (all require an executor restart to
 take effect, as there is no dynamic reconfiguration in this version):
@@ -314,11 +324,13 @@ take effect, as there is no dynamic reconfiguration in this version):
   saturated network.
 
 If a consumer falls well behind its producer, memory pressure threatens buffer allocation, the
-network saturates, or producer and consumer versions differ, streaming shuffle automatically reverts
-to sort-based shuffle for the affected stage. For the full architecture, fallback model,
-troubleshooting, and feature-flag migration guidance, see the
-[Streaming Shuffle](streaming-shuffle.html) guide; for the complete list of properties, see the
-[Shuffle Behavior](configuration.html#shuffle-behavior) section of the configuration guide.
+network saturates, or producer and consumer versions differ, streaming shuffle is designed to
+automatically revert to sort-based shuffle for the affected stage. The detection signals for these
+conditions are computed in this release; the manager-driven revert that consumes them arrives with
+the streaming manager in a later checkpoint. For the full architecture, fallback model,
+troubleshooting, and feature-flag migration guidance — including which parts are implemented now —
+see the [Streaming Shuffle](streaming-shuffle.html) guide; for the complete list of properties, see
+the [Shuffle Behavior](configuration.html#shuffle-behavior) section of the configuration guide.
 
 ## Broadcasting Large Variables
 

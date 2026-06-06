@@ -208,11 +208,21 @@ private[spark] class BackpressureProtocol(
    * @return true if admitted, false if throttled (a backpressure event was recorded)
    */
   def acquire(bytes: Long): Boolean = {
-    val granted = tryAcquire(bytes)
-    if (!granted) {
-      recordBackpressureEvent(s"rate limiter throttled request for $bytes bytes")
+    // Enforce the consumer-driven pause signal directly on the acquisition path: when the consumer
+    // heartbeat has gone missing past the connection deadline the producer MUST NOT emit, so a
+    // non-blocking acquire is refused (and recorded) regardless of token availability. This is the
+    // enforcement point the writer relies on so a missing heartbeat actually pauses writes, rather
+    // than merely exposing `producerShouldPause` as an unconsumed advisory signal.
+    if (producerPaused) {
+      recordBackpressureEvent("producer paused: consumer heartbeat missing; refusing emission")
+      false
+    } else {
+      val granted = tryAcquire(bytes)
+      if (!granted) {
+        recordBackpressureEvent(s"rate limiter throttled request for $bytes bytes")
+      }
+      granted
     }
-    granted
   }
 
   /**
@@ -225,22 +235,47 @@ private[spark] class BackpressureProtocol(
    * @return true once admitted, false if the waiting thread was interrupted
    */
   def acquireBlocking(bytes: Long): Boolean = {
-    if (rateLimitingDisabled || bytes <= 0L) {
-      true
-    } else {
-      var throttled = false
-      var result = true
-      var waiting = true
-      while (waiting) {
-        if (tryAcquire(bytes)) {
+    // Fast path: with rate limiting disabled there is no token accounting to wait on. We take the
+    // fast path ONLY when the producer is neither paused (missing consumer) nor in fallback, so
+    // those states are honored even for the "unlimited" bandwidth configuration.
+    if (rateLimitingDisabled && !producerPaused && !shouldFallbackFlag && bytes > 0L) {
+      return true
+    }
+    if (bytes <= 0L) {
+      return true
+    }
+    var throttled = false
+    var pauseRecorded = false
+    var result = true
+    var waiting = true
+    // Bound the time the producer will block on a missing-consumer pause; a permanently absent
+    // consumer is reported as a failure (false) rather than blocking the map task forever.
+    val pauseDeadlineNanos = System.nanoTime() + PAUSE_MAX_WAIT_NANOS
+    while (waiting) {
+      if (Thread.interrupted()) {
+        // Interruption aborts pacing cleanly: restore the interrupt flag and signal the caller to
+        // abort the block. The writer treats this as a write failure, never a successful emission.
+        Thread.currentThread().interrupt()
+        waiting = false
+        result = false
+      } else if (shouldFallbackFlag) {
+        // A sustained-slowdown fallback has fired: stop pacing and let the caller degrade the
+        // shuffle gracefully (the writer throws so the manager can fall back to sort).
+        waiting = false
+        result = false
+      } else if (producerPaused) {
+        // Consumer heartbeat missing: pause emission until the consumer recovers, bounded by the
+        // pause deadline. This is the blocking-path enforcement of `producerShouldPause`.
+        if (!pauseRecorded) {
+          recordBackpressureEvent("producer paused: consumer heartbeat missing; waiting to resume")
+          pauseRecorded = true
+        }
+        if (System.nanoTime() >= pauseDeadlineNanos) {
           waiting = false
+          result = false
         } else {
-          if (!throttled) {
-            recordBackpressureEvent(s"blocking acquire waiting for $bytes bytes")
-            throttled = true
-          }
           try {
-            Thread.sleep(estimatedWaitMillis(bytes))
+            Thread.sleep(PAUSE_POLL_MILLIS)
           } catch {
             case _: InterruptedException =>
               Thread.currentThread().interrupt()
@@ -248,9 +283,26 @@ private[spark] class BackpressureProtocol(
               result = false
           }
         }
+      } else if (rateLimitingDisabled || tryAcquire(bytes)) {
+        // Either limiting is off (we reached here only because of a transient pause that has now
+        // cleared) or enough tokens were available: the block is admitted.
+        waiting = false
+      } else {
+        if (!throttled) {
+          recordBackpressureEvent(s"blocking acquire waiting for $bytes bytes")
+          throttled = true
+        }
+        try {
+          Thread.sleep(estimatedWaitMillis(bytes))
+        } catch {
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+            waiting = false
+            result = false
+        }
       }
-      result
     }
+    result
   }
 
   // Estimate how long to wait for the current token deficit to refill, bounded to a small cap so we
@@ -504,6 +556,16 @@ private[spark] object BackpressureProtocol {
   /** Upper bound on a single blocking-acquire sleep, in milliseconds (re-check cadence). */
   val MAX_WAIT_MILLIS: Long = 1000L
 
+  /** Poll cadence while the producer is paused waiting for a missing consumer to recover, in ms. */
+  val PAUSE_POLL_MILLIS: Long = 50L
+
+  /**
+   * Maximum time `acquireBlocking` will wait on a missing-consumer pause before reporting failure,
+   * in nanoseconds (2 minutes). A permanently absent consumer is surfaced as a failed acquisition
+   * rather than blocking the map task indefinitely, letting the writer abort/degrade.
+   */
+  val PAUSE_MAX_WAIT_NANOS: Long = 120L * 1000L * 1000L * 1000L
+
   /**
    * Immutable descriptor used by [[BackpressureProtocol.comparePriority]] to arbitrate bandwidth
    * among contending shuffles.
@@ -517,4 +579,3 @@ private[spark] object BackpressureProtocol {
       numPartitions: Int,
       dataVolumeBytes: Long)
 }
-
