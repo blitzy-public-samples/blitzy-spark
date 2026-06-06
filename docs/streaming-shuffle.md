@@ -179,10 +179,11 @@ classes that complete the data path and fallback machinery (`StreamingBlockExcha
 `StreamingShuffleTransport`, `StreamingShuffleEndpointCoordinator`, `FallbackShuffleWriter`,
 `FallbackShuffleReader`, `SpillableReplayBuffer`) and the `StreamingShuffleSource` metrics source.
 
-The only production changes outside the package are the `streaming` entry in the `ShuffleManager`
-factory map, the five `spark.shuffle.streaming.*` entries in the configuration registry, and an
-additive generic `computeChecksum` overload on the existing `ShuffleChecksumUtils` (reusing the
-established CRC32C facility rather than introducing a new one).
+The only two production changes outside the package are the `streaming` entry in the
+`ShuffleManager` factory map and the five `spark.shuffle.streaming.*` entries in the configuration
+registry. CRC32C integrity is handled entirely inside the package by the `StreamingShuffleChecksum`
+helper, which reuses the established Spark checksum facility (`ShuffleChecksumHelper`) rather than
+introducing a new one; no existing checksum class is modified.
 
 The matching test suites live in `core/src/test/scala/org/apache/spark/shuffle/streaming/`
 (`StreamingShuffleManagerSuite`, `StreamingShuffleWriterSuite`, `StreamingShuffleReaderSuite`,
@@ -208,8 +209,9 @@ Streaming shuffle reuses the following existing subsystems **without modificatio
   `StreamingShuffleTransport` built on the existing `TransportContext`; co-located producers and
   consumers (or a transport-less unit test) use the same `StreamingBlockExchange` contract
   in-process.
-- **Checksums** -- CRC32C generation and validation reuse the existing `ShuffleChecksumUtils`
-  facility.
+- **Checksums** -- CRC32C generation and validation reuse the existing `ShuffleChecksumHelper`
+  facility, accessed through the in-package `StreamingShuffleChecksum` helper; no new checksum
+  algorithm or implementation is introduced.
 - **Output discovery** -- the writer emits a standard `MapStatus`, so `MapOutputTracker` and the
   DAG scheduler locate outputs exactly as they do for sort-based shuffle.
 - **Fault recovery** -- on partial-read invalidation the reader throws the existing
@@ -323,7 +325,8 @@ data: spilled blocks remain addressable by key, are read back from disk on deman
 retransmission), and are reclaimed once consumed.
 
 **Integrity.** Every streamed block is protected with a **CRC32C** checksum computed and validated
-through the existing `ShuffleChecksumUtils` facility (no new checksum implementation). If a block
+through the existing `ShuffleChecksumHelper` facility, accessed via the in-package
+`StreamingShuffleChecksum` helper (no new checksum implementation). If a block
 fails validation, it is retransmitted using **exponential backoff (start 1s, max 5 attempts)**.
 
 **Atomic partial-read invalidation.** If a producer times out or a block is corrupt beyond
