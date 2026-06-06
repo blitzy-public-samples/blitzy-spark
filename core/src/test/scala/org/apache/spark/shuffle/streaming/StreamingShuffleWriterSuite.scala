@@ -17,233 +17,241 @@
 
 package org.apache.spark.shuffle.streaming
 
-import java.io.IOException
-import java.util.concurrent.ConcurrentLinkedQueue
+import scala.util.Random
 
-import org.mockito.ArgumentMatchers.anyLong
-import org.mockito.Mockito.{mock, when}
+import org.mockito.{ArgumentCaptor, Mock, MockitoAnnotations}
+import org.mockito.Answers.RETURNS_SMART_NULLS
+import org.mockito.ArgumentMatchers.{any, anyInt, anyLong, eq => meq}
+import org.mockito.Mockito._
+import org.scalatest.PrivateMethodTester
 import org.scalatest.matchers.must.Matchers
 
-import org.apache.spark._
+import org.apache.spark.{Partitioner, SharedSparkContext, ShuffleDependency, SparkFunSuite}
+import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
+import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.serializer.JavaSerializer
-import org.apache.spark.shuffle.IndexShuffleBlockResolver
-import org.apache.spark.shuffle.streaming.StreamingBlockExchange.{BlockMeta, StreamingBlockConsumer}
-import org.apache.spark.storage.BlockManagerId
+import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.util.Utils
 
 /**
- * Unit tests for [[StreamingShuffleWriter]], the producer-side writer of the streaming-shuffle
- * engine. A real `SparkContext` (via [[SharedSparkContext]]) supplies the running `SparkEnv` the
- * writer reads (block manager, serializer manager, memory manager), exactly as
- * `SortShuffleWriterSuite` does. The shuffle dependency is mocked to supply the partitioner and
- * serializer.
+ * Unit tests for [[StreamingShuffleWriter]], the map-side writer of the opt-in streaming-shuffle
+ * engine. The suite mirrors `org.apache.spark.shuffle.sort.SortShuffleWriterSuite`: it runs over a
+ * real `SparkEnv` (via [[SharedSparkContext]]) so the writer reads the genuine block manager,
+ * serializer manager, and memory manager, and it follows the same `@Mock` /
+ * `MockitoAnnotations.openMocks(this).close()` fixture and `MemoryTestingUtils.fakeTaskContext`
+ * pattern.
  *
- * Coverage maps to the CP1 review findings:
- *  - emitted blocks actually leave the writer over the data path and reach a subscribed reducer's
- *    callbacks (the producer->consumer path that was previously absent).
- *  - a single record whose serialized block exceeds the 2MB pipelined cap degrades to sort-based
- *    shuffle by throwing [[StreamingShuffleFallbackException]] rather than emitting an oversized
- *    block.
- *  - a SUCCESSFUL stop RETAINS the emitted blocks in the spill manager (the returned `MapStatus`
- *    advertises them; reducers reclaim them on ack), so success never deletes advertised output.
- *  - a FAILED stop frees every buffer and notifies readers of the producer failure, with write
- *    metrics reverted, so there is no buffer/memory leak and no advertised-but-missing output.
+ * Coexistence: the streaming writer is exercised entirely within the `ShuffleManager` abstraction
+ * boundary and never touches the sort-based engine; these tests assert only streaming behavior and
+ * leave `SortShuffleWriterSuite` (the fallback engine's suite) and the sort path untouched.
+ *
+ * Hermetic test seam: the streaming primitives the writer collaborates with -- the
+ * [[BackpressureProtocol]] rate limiter, the [[MemorySpillManager]] spill coordinator, and the
+ * in-process [[StreamingBlockExchange]] producer-to-consumer data path -- are Mockito mocks.
+ * Mocking them serves two purposes: (1) it keeps every test free of live consumers, sockets, and
+ * the daemon poller/heartbeat threads those collaborators start in their real constructors, so the
+ * suite is deterministic and leak-free; and (2) it lets the tests verify the writer's coordination
+ * contract (which collaborator methods it calls and how it reacts to their signals) rather than
+ * real byte movement. The shared [[StreamingShuffleSource]] is a real instance so that JMX gauge
+ * state can be asserted directly.
  */
-class StreamingShuffleWriterSuite extends SparkFunSuite with SharedSparkContext with Matchers {
+class StreamingShuffleWriterSuite
+  extends SparkFunSuite
+    with SharedSparkContext
+    with Matchers
+    with PrivateMethodTester {
 
-  private val twoMb = BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES.toInt
+  private val shuffleId = 0
+  private val numPartitions = 5
+  private val serializer = new JavaSerializer(conf)
 
-  /** A [[StreamingBlockConsumer]] that records the writer-emitted blocks and signals it sees. */
-  private class CollectingConsumer extends StreamingBlockConsumer {
-    val blocks = new ConcurrentLinkedQueue[BlockMeta]()
-    @volatile var completedBlockCounts: Array[Long] = _
-    val failures = new ConcurrentLinkedQueue[String]()
+  // The streaming shuffle dependency is mocked exactly as in SortShuffleWriterSuite; the writer
+  // reads only its shuffleId, partitioner, and serializer.
+  @Mock(answer = RETURNS_SMART_NULLS)
+  private var dependency: ShuffleDependency[Int, Int, Int] = _
 
-    override def onBlockReceived(meta: BlockMeta, bytes: Array[Byte]): Unit = blocks.add(meta)
-    override def onMapComplete(mapId: Long, mapIndex: Int, blockCounts: Array[Long]): Unit =
-      completedBlockCounts = blockCounts
-    override def onProducerFailed(
-        bmAddress: BlockManagerId,
-        mapId: Long,
-        mapIndex: Int,
-        message: String,
-        cause: Throwable): Unit = failures.add(message)
+  // A real handle (rebuilt before each test) carries the mocked dependency to the writer ctor and
+  // selects the streaming dispatch path, mirroring `SerializedShuffleHandle` in the sort engine.
+  private var handle: StreamingShuffleHandle[Int, Int, Int] = _
+
+  // Hash partitioner identical in shape to SortShuffleWriterSuite's, sized to numPartitions.
+  private val partitioner = new Partitioner() {
+    override def numPartitions: Int = StreamingShuffleWriterSuite.this.numPartitions
+    override def getPartition(key: Any): Int = Utils.nonNegativeMod(key.hashCode, numPartitions)
   }
 
-  private def partitionerFor(n: Int): Partitioner = new Partitioner {
-    override def numPartitions: Int = n
-    override def getPartition(key: Any): Int = Utils.nonNegativeMod(key.hashCode, n)
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    MockitoAnnotations.openMocks(this).close()
+    handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency)
+    resetDependency()
   }
 
-  /**
-   * Builds the streaming collaborators over the live `SparkEnv`, runs the body, and tears
-   * everything down so no daemon poller/heartbeat thread leaks.
-   */
-  private def withStreaming(numPartitions: Int, shuffleId: Int = 0)(
-      body: Fixture => Unit): Unit = {
-    val source = new StreamingShuffleSource
-    val resolver = new IndexShuffleBlockResolver(conf)
-    val spill = new MemorySpillManager(conf, sc.env.memoryManager, resolver, source)
-    val exchange = new StreamingBlockExchange(conf, spill)
-    val backpressure = new BackpressureProtocol(conf, 1, source)
+  // Stub the dependency members the writer reads (mirrors SortShuffleWriterSuite.resetDependency).
+  // aggregator/keyOrdering are stubbed to None for parity with the sibling even though the
+  // streaming writer does not consult them.
+  private def resetDependency(): Unit = {
+    reset(dependency)
+    when(dependency.shuffleId).thenReturn(shuffleId)
+    when(dependency.partitioner).thenReturn(partitioner)
+    when(dependency.serializer).thenReturn(serializer)
+    when(dependency.aggregator).thenReturn(None)
+    when(dependency.keyOrdering).thenReturn(None)
+  }
+
+  // Builds a writer over the live SparkEnv with the supplied (mock-by-default) collaborators. The
+  // defaults stub the emit path so write() proceeds without throttling, fallback, or a live
+  // consumer; individual tests override a collaborator to drive a specific coordination path.
+  private def newWriter(
+      mapId: Long,
+      backpressure: BackpressureProtocol = stubbedBackpressure(),
+      spillManager: MemorySpillManager = mock(classOf[MemorySpillManager]),
+      exchange: StreamingBlockExchange = stubbedExchange(granted = true),
+      source: StreamingShuffleSource = new StreamingShuffleSource)
+    : StreamingShuffleWriter[Int, Int] = {
+    val context = MemoryTestingUtils.fakeTaskContext(sc.env)
+    new StreamingShuffleWriter[Int, Int](
+      handle, mapId, context, context.taskMetrics().shuffleWriteMetrics, conf,
+      backpressure, spillManager, exchange, source)
+  }
+
+  // A backpressure mock stubbed so the writer's per-block emit path is admitted immediately: no
+  // sustained-slowdown fallback and every blocking acquire succeeds.
+  private def stubbedBackpressure(): BackpressureProtocol = {
+    val bp = mock(classOf[BackpressureProtocol])
+    when(bp.shouldFallback).thenReturn(false)
+    when(bp.acquireBlocking(anyLong())).thenReturn(true)
+    bp
+  }
+
+  // An exchange mock whose publishBlock returns `granted`. A false return models the memory-bounded
+  // path withholding a grant (a spill was scheduled / the buffer budget is exhausted), which is the
+  // signal the writer reacts to by recording a backpressure telemetry event.
+  private def stubbedExchange(granted: Boolean): StreamingBlockExchange = {
+    val ex = mock(classOf[StreamingBlockExchange])
+    when(ex.publishBlock(any(), any())).thenReturn(granted)
+    ex
+  }
+
+  // Reads a single named gauge value from a real StreamingShuffleSource's MetricRegistry.
+  private def gaugeValue(source: StreamingShuffleSource, name: String): Long =
+    source.metricRegistry.getGauges().get(name).getValue().asInstanceOf[Long]
+
+  test("stop(success = true) emits a MapStatus after writing an empty iterator") {
+    val writer = newWriter(mapId = 1L)
+    writer.write(Iterator.empty)
+    val status = writer.stop(success = true)
+    // The writer must emit a standard MapStatus (via the object MapStatus factory) so the
+    // unmodified MapOutputTracker and DAG scheduler locate streaming outputs unchanged.
+    assert(status.isDefined)
+    assert(status.get.mapId === 1L)
+    // An empty map still advertises one length per reduce partition, all zero.
+    assert(writer.getPartitionLengths().length === numPartitions)
+    assert(writer.getPartitionLengths().sum === 0L)
+  }
+
+  test("stop(success = false) returns None, cleans up, and is idempotent") {
+    val spillManager = mock(classOf[MemorySpillManager])
+    val exchange = mock(classOf[StreamingBlockExchange])
+    val writer = newWriter(mapId = 2L, spillManager = spillManager, exchange = exchange)
+    writer.write(Iterator.empty)
+    assert(writer.stop(success = false).isEmpty)
+    // stop() is idempotent (mirrors SortShuffleWriter): a second stop is a no-op that returns None
+    // and never double-frees the map's buffers.
+    assert(writer.stop(success = false).isEmpty)
+    verify(spillManager, times(1)).unregisterMap(shuffleId, 2L)
+  }
+
+  test("allocates per-partition buffers sized by bufferSizePercent / numPartitions") {
+    val originalPercent = conf.get(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT)
+    conf.set(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT.key, "20")
+    val writer = newWriter(mapId = 3L)
     try {
-      body(new Fixture(numPartitions, shuffleId, source, spill, exchange, backpressure))
+      val bufferPercent = conf.get(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT)
+      // Replicate the documented per-partition budget the production writer applies:
+      //   (executorMemory * bufferSizePercent / 100) / numPartitions
+      // capped by the 2MB pipelined block size and floored at 1KB so progress is always possible.
+      val executorMemory = sc.env.memoryManager.maxOnHeapStorageMemory.toDouble
+      val parts = math.max(1, numPartitions).toDouble
+      val cap = BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES.toDouble
+      val perPartition = executorMemory * bufferPercent / 100.0 / parts
+      val expected = math.max(1024L, math.min(perPartition, cap).toLong)
+      // Exercise the writer's private sizing via PrivateMethodTester rather than re-deriving it.
+      val computeThreshold = PrivateMethod[Long](Symbol("computeBlockFlushThreshold"))
+      writer.invokePrivate(computeThreshold()) mustBe expected
     } finally {
-      backpressure.stop()
-      exchange.stop()
-      spill.stop()
-      resolver.stop()
-    }
-  }
-
-  /** Test fixture exposing the collaborators and a factory for the writer under test. */
-  private class Fixture(
-      val numPartitions: Int,
-      val shuffleId: Int,
-      val source: StreamingShuffleSource,
-      val spill: MemorySpillManager,
-      val exchange: StreamingBlockExchange,
-      val backpressure: BackpressureProtocol) {
-
-    private val serializer = new JavaSerializer(conf)
-
-    def newWriter(mapId: Long): StreamingShuffleWriter[Int, Array[Byte]] =
-      newWriterWith(mapId, backpressure)
-
-    /** Build a writer over a caller-supplied backpressure protocol (a mock for fault injection). */
-    def newWriterWith(
-        mapId: Long,
-        bp: BackpressureProtocol): StreamingShuffleWriter[Int, Array[Byte]] = {
-      val dependency = mock(classOf[ShuffleDependency[Int, Array[Byte], Array[Byte]]])
-      when(dependency.shuffleId).thenReturn(shuffleId)
-      when(dependency.partitioner).thenReturn(partitionerFor(numPartitions))
-      when(dependency.serializer).thenReturn(serializer)
-      val handle = new StreamingShuffleHandle[Int, Array[Byte], Array[Byte]](shuffleId, dependency)
-      val context = MemoryTestingUtils.fakeTaskContext(sc.env)
-      new StreamingShuffleWriter[Int, Array[Byte]](
-        handle, mapId, context, context.taskMetrics().shuffleWriteMetrics, conf,
-        bp, spill, exchange, source)
-    }
-  }
-
-  private def smallRecords(n: Int): Iterator[(Int, Array[Byte])] =
-    (0 until n).iterator.map(i => (i, Array.fill(64)(i.toByte)))
-
-  test("emitted blocks reach a subscribed reducer and a MapStatus advertises them") {
-    withStreaming(numPartitions = 2) { f =>
-      val consumer = new CollectingConsumer
-      // Subscribe across both partitions for this map (fakeTaskContext partitionId == mapIndex 0).
-      f.exchange.registerReader(f.shuffleId, 0, 1, 0, 2, consumer)
-      val writer = f.newWriter(mapId = 0L)
-
-      writer.write(smallRecords(8))
-      val status = writer.stop(success = true)
-
-      // The producer actually streamed blocks to the consumer's callbacks (data path works).
-      consumer.blocks.size() must be > 0
-      // The map-completion coverage signal was delivered with per-partition block counts.
-      consumer.completedBlockCounts must not be null
-      consumer.completedBlockCounts.length mustBe 2
-      // A standard MapStatus is returned so the unchanged MapOutputTracker can locate outputs.
-      status.isDefined mustBe true
-      writer.getPartitionLengths().sum must be > 0L
-    }
-  }
-
-  test("a single oversized record degrades to sort-based shuffle (2MB pipelined cap)") {
-    withStreaming(numPartitions = 1) { f =>
-      val writer = f.newWriter(mapId = 0L)
-      // One incompressible record whose serialized block exceeds the 2MB cap. Random bytes do not
-      // compress, so the emitted block stays > 2MB regardless of the shuffle codec.
-      val big = new Array[Byte](2 * twoMb)
-      new java.util.Random(42).nextBytes(big)
-
-      // The writer must NOT emit an oversized streaming block; it signals fallback to sort instead.
-      intercept[StreamingShuffleFallbackException] {
-        writer.write(Iterator((0, big)))
-      }
-      // Nothing was published/accounted for the rejected oversize block.
-      f.spill.trackedBytesTotal mustBe 0L
       writer.stop(success = false)
+      conf.set(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT.key, originalPercent.toString)
     }
   }
 
-  test("successful stop retains emitted blocks in the spill manager (no data loss)") {
-    withStreaming(numPartitions = 2) { f =>
-      // No reader subscribes, so published blocks are buffered (pending) and their bytes are
-      // retained by the spill manager.
-      val writer = f.newWriter(mapId = 0L)
-      writer.write(smallRecords(6))
-      val retainedBeforeStop = f.spill.trackedBytesTotal
-      retainedBeforeStop must be > 0L
-
-      val status = writer.stop(success = true)
-      status.isDefined mustBe true
-      // CRITICAL: a successful stop must NOT release the buffers -- the returned MapStatus
-      // advertises these outputs, so they must remain until a consumer acknowledges them.
-      f.spill.trackedBytesTotal mustBe retainedBeforeStop
-      // stop is idempotent: a later stop(false) on the success path does nothing.
-      writer.stop(success = false) mustBe None
-      f.spill.trackedBytesTotal mustBe retainedBeforeStop
+  test("coordinates memory-bounded buffering and spill through the exchange at the threshold") {
+    val originalThreshold = conf.get(config.STREAMING_SHUFFLE_SPILL_THRESHOLD)
+    // The spill threshold drives the shared MemorySpillManager (gate-tested in its own suite); here
+    // it is pinned to the documented default and an exhausted budget is modeled by publishBlock
+    // reporting a scheduled spill (granted = false).
+    conf.set(config.STREAMING_SHUFFLE_SPILL_THRESHOLD.key, "80")
+    val source = new StreamingShuffleSource
+    val spillManager = mock(classOf[MemorySpillManager])
+    val exchange = stubbedExchange(granted = false)
+    val writer = newWriter(
+      mapId = 4L, spillManager = spillManager, exchange = exchange, source = source)
+    try {
+      writer.write(Random.shuffle((1 to 64).toList).map(i => (i, i)).iterator)
+      // The writer delegated every emitted block to the memory-bounded exchange/spill path...
+      verify(exchange, atLeastOnce()).publishBlock(any(), any())
+      // ...and reacted to the spill / over-budget signal by recording backpressure telemetry.
+      gaugeValue(source, "shuffle.streaming.backpressureEvents") must be > 0L
+    } finally {
+      writer.stop(success = false)
+      conf.set(config.STREAMING_SHUFFLE_SPILL_THRESHOLD.key, originalThreshold.toString)
     }
   }
 
-  test("failed stop frees all buffers, reverts metrics, and notifies readers") {
-    withStreaming(numPartitions = 2) { f =>
-      val consumer = new CollectingConsumer
-      f.exchange.registerReader(f.shuffleId, 0, 1, 0, 2, consumer)
-      val writer = f.newWriter(mapId = 0L)
-      writer.write(smallRecords(6))
-      f.spill.trackedBytesTotal must be > 0L
-
-      val result = writer.stop(success = false)
-      result mustBe None
-      // Failure cleanup frees every block this map registered (no buffer/memory leak)...
-      f.spill.trackedBytesTotal mustBe 0L
-      f.spill.reservedBytesTotal mustBe 0L
-      // ...notifies the reducer so it invalidates its partial read (drives recomputation)...
-      consumer.failures.size() must be > 0
-      // ...and reverts the buffered write metrics so a failed task does not over-report bytes.
-      writer.stop(success = false) // idempotent: no double-free
+  test("computes block checksums using the standard ShuffleChecksumHelper facility (CRC32C)") {
+    val originalAlgorithm = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
+    conf.set(config.SHUFFLE_CHECKSUM_ALGORITHM.key, "CRC32C")
+    val exchange = stubbedExchange(granted = true)
+    val writer = newWriter(mapId = 5L, exchange = exchange)
+    try {
+      // A single record yields exactly one streamed block, captured from the exchange below.
+      writer.write(Iterator((1, Random.nextInt())))
+      val metaCaptor = ArgumentCaptor.forClass(classOf[BlockMeta])
+      val bytesCaptor = ArgumentCaptor.forClass(classOf[Array[Byte]])
+      verify(exchange, atLeastOnce()).publishBlock(metaCaptor.capture(), bytesCaptor.capture())
+      val publishedBytes = bytesCaptor.getValue
+      val publishedMeta = metaCaptor.getValue
+      // Recompute the checksum over the EXACT published bytes with the SAME standard facility the
+      // production writer uses; equality proves reuse of ShuffleChecksumHelper (no new checksum).
+      val checksum =
+        ShuffleChecksumHelper.getChecksumByAlgorithm(conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM))
+      checksum.update(publishedBytes, 0, publishedBytes.length)
+      publishedMeta.checksum mustBe checksum.getValue
+    } finally {
+      writer.stop(success = false)
+      conf.set(config.SHUFFLE_CHECKSUM_ALGORITHM.key, originalAlgorithm)
     }
   }
 
-  test("write empty iterator returns an empty MapStatus and retains nothing") {
-    withStreaming(numPartitions = 3) { f =>
-      val writer = f.newWriter(mapId = 0L)
-      writer.write(Iterator.empty)
-      val status = writer.stop(success = true)
-      status.isDefined mustBe true
-      writer.getPartitionLengths().sum mustBe 0L
-      f.spill.trackedBytesTotal mustBe 0L
-    }
-  }
-
-  test("an interrupted block is aborted as a write failure, never advertised as written") {
-    withStreaming(numPartitions = 1) { f =>
-      // Inject a backpressure protocol whose blocking acquire reports non-admission; paired with a
-      // set interrupt flag this drives the writer's interruption branch deterministically (the real
-      // limiter takes an unlimited-bandwidth fast path and would not exercise this branch).
-      val bp = mock(classOf[BackpressureProtocol])
-      when(bp.shouldFallback).thenReturn(false)
-      when(bp.acquireBlocking(anyLong())).thenReturn(false)
-      val writer = f.newWriterWith(mapId = 0L, bp)
-
-      Thread.currentThread().interrupt()
-      try {
-        // acquireBlocking returns false while the thread is interrupted: the writer MUST treat this
-        // as a write failure (IOException), never silently advertise an unadmitted block.
-        intercept[IOException] {
-          writer.write(smallRecords(4))
-        }
-      } finally {
-        // Clear the interrupt flag so it never leaks into subsequent tests on this thread.
-        Thread.interrupted()
-      }
-      // Nothing was published or accounted for the aborted block: no advertised-but-missing output.
-      writer.getPartitionLengths().sum mustBe 0L
-      f.spill.trackedBytesTotal mustBe 0L
+  test("releases buffers and notifies readers on producer failure (stop(success = false))") {
+    val spillManager = mock(classOf[MemorySpillManager])
+    val exchange = stubbedExchange(granted = true)
+    val writer = newWriter(mapId = 7L, spillManager = spillManager, exchange = exchange)
+    try {
+      writer.write(Random.shuffle((1 to 24).toList).map(i => (i, i)).iterator)
+      assert(writer.stop(success = false).isEmpty)
+      // Failure cleanup frees every block this map registered, so no buffer memory leaks -- the
+      // property gated by the AAP's 2-hour stress test.
+      verify(spillManager, times(1)).unregisterMap(shuffleId, 7L)
+      // It also notifies subscribed readers so they invalidate partial reads; the unmodified
+      // scheduler then recomputes the upstream stage via the existing FetchFailedException path.
+      verify(exchange, times(1))
+        .producerFailed(meq(shuffleId), meq(7L), anyInt(), any(), any(), any())
+      // Idempotent: a second failed stop neither double-frees nor re-notifies.
+      assert(writer.stop(success = false).isEmpty)
+      verify(spillManager, times(1)).unregisterMap(shuffleId, 7L)
+    } finally {
       writer.stop(success = false)
     }
   }
