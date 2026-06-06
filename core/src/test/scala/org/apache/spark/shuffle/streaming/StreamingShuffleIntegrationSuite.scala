@@ -93,7 +93,9 @@ class StreamingShuffleIntegrationSuite extends SparkFunSuite with SharedSparkCon
     when(dependency.shuffleId).thenReturn(shuffleId)
     when(dependency.partitioner).thenReturn(partitionerFor(numPartitions))
     when(dependency.serializer).thenReturn(serializer)
-    val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency)
+    // These integration tests model a single producer map (mapId 0L) and read with a bounded
+    // endMapIndex, so numMaps = 1 is the honest, sentinel-irrelevant value.
+    val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency, numMaps = 1)
     val context = MemoryTestingUtils.fakeTaskContext(sc.env)
     new StreamingShuffleWriter[Int, Int](
       handle, mapId, context, context.taskMetrics().shuffleWriteMetrics, conf,
@@ -114,7 +116,9 @@ class StreamingShuffleIntegrationSuite extends SparkFunSuite with SharedSparkCon
     when(dependency.serializer).thenReturn(serializer)
     when(dependency.aggregator).thenReturn(None)
     when(dependency.keyOrdering).thenReturn(None)
-    val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency)
+    // Single producer map; the reader is always driven with a bounded endMapIndex here, so the
+    // all-maps sentinel branch is not exercised and numMaps = 1 is the honest value.
+    val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency, numMaps = 1)
     val context = MemoryTestingUtils.fakeTaskContext(sc.env)
     val readMetrics = context.taskMetrics().createTempShuffleReadMetrics()
     new StreamingShuffleReader[Int, Int](

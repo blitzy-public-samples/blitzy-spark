@@ -85,7 +85,9 @@ class StreamingShuffleWriterSuite
   override def beforeEach(): Unit = {
     super.beforeEach()
     MockitoAnnotations.openMocks(this).close()
-    handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency)
+    // numMaps is irrelevant to the writer (it never resolves the reader's all-maps sentinel); a
+    // single map task is modelled here, so 1 is the honest value.
+    handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency, numMaps = 1)
     resetDependency()
   }
 

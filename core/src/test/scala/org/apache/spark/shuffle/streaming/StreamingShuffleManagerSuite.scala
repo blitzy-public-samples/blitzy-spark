@@ -26,6 +26,7 @@ import org.scalatest.matchers.must.Matchers
 import org.apache.spark._
 import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
+import org.apache.spark.rdd.RDD
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.shuffle.{ShuffleWriter, ShuffleWriteMetricsReporter}
@@ -96,6 +97,13 @@ class StreamingShuffleManagerSuite
     when(dep.aggregator).thenReturn(None)
     when(dep.keyOrdering).thenReturn(None)
     when(dep.mapSideCombine).thenReturn(mapSideCombine)
+    // registerShuffle (the streaming path) reads dependency.rdd.partitions.length on the driver to
+    // capture numMaps for the handle (QA finding F-1). The production dependency's rdd is non-null
+    // there; stub a real (tiny) parent RDD here so the manager can compute the map count. Using a
+    // real RDD (not a mock) sidesteps RDD's `final` partitions method.
+    when(dep.rdd).thenReturn(
+      sc.parallelize(0 until numPartitions, numPartitions).map(i => (i, i))
+        .asInstanceOf[RDD[Product2[Int, Int]]])
     // The composed sort writer's ExternalSorter reads the dependency's row-based checksums even
     // when none are configured; the production default is an empty array, so mirror that here.
     // Without this stub the mock returns null and the real sort fallback writer NPEs on insertAll.
@@ -103,8 +111,12 @@ class StreamingShuffleManagerSuite
     dep
   }
 
-  private def intHandle(shuffleId: Int, numPartitions: Int): StreamingShuffleHandle[Int, Int, Int] =
-    new StreamingShuffleHandle[Int, Int, Int](shuffleId, intDependency(shuffleId, numPartitions))
+  private def intHandle(
+      shuffleId: Int,
+      numPartitions: Int,
+      numMaps: Int = 1): StreamingShuffleHandle[Int, Int, Int] =
+    new StreamingShuffleHandle[Int, Int, Int](
+      shuffleId, intDependency(shuffleId, numPartitions), numMaps)
 
   // Constructs a manager with the streaming feature flag set as requested, runs `body`, and ALWAYS
   // stops the manager (tearing down any lazily-built streaming engine: heartbeat/poller daemon
@@ -239,7 +251,8 @@ class StreamingShuffleManagerSuite
       // The sort fallback writer's ExternalSorter reads the (empty) row-based checksums; stub them
       // so the real sort write path does not NPE once the oversize record degrades to sort.
       when(dependency.rowBasedChecksums).thenReturn(ShuffleDependency.EMPTY_ROW_BASED_CHECKSUMS)
-      val handle = new StreamingShuffleHandle[Int, Array[Byte], Array[Byte]](0, dependency)
+      val handle =
+        new StreamingShuffleHandle[Int, Array[Byte], Array[Byte]](0, dependency, numMaps = 1)
       val context = fakeContext()
       val writer = manager.getWriter[Int, Array[Byte]](
         handle, 0L, context, context.taskMetrics().shuffleWriteMetrics)

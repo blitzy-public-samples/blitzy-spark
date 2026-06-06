@@ -202,7 +202,14 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
         logDebug(s"Registering shuffle $shuffleId on the streaming path " +
           s"(${dependency.partitioner.numPartitions} partitions)")
       }
-      new StreamingShuffleHandle[K, V, C](shuffleId, dependency)
+      // numMaps = total producer-map-task count, captured HERE on the driver. registerShuffle runs
+      // during ShuffleDependency construction, where dependency.rdd is non-null; but
+      // ShuffleDependency.rdd is @transient and is null once the handle is deserialized on an
+      // executor. Carrying numMaps in the handle lets the executor-side StreamingShuffleReader
+      // resolve the getReader(endMapIndex=Int.MaxValue) sentinel with no MapOutputTracker RPC or
+      // scheduler change (QA finding F-1). It equals the numMaps the DAG scheduler registers.
+      val numMaps = dependency.rdd.partitions.length
+      new StreamingShuffleHandle[K, V, C](shuffleId, dependency, numMaps)
     } else {
       // Coexistence: streaming is disabled OR the dependency is unsupported -> delegate
       // to the composed SortShuffleManager, which remains the default and the fallback. The sort

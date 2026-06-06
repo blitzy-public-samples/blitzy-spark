@@ -154,12 +154,17 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       // real sleeps, and the production producer-timeout deadline unless a test shortens it.
       producerTimeoutMillis: Long = StreamingShuffleReader.DefaultProducerTimeoutMillis,
       retryBackoffStartMillis: Long = 0L,
-      shuffleId: Int = 0): (StreamingShuffleReader[Int, Int], TempShuffleReadMetrics) = {
+      shuffleId: Int = 0,
+      // Number of producing maps for this shuffle, carried on the StreamingShuffleHandle exactly as
+      // StreamingShuffleManager captures it on the driver. The reader resolves the
+      // `ShuffleManager.getReader` endMapIndex=Int.MaxValue sentinel to this count, so a test can
+      // drive the production full-read path with a reachable completion target.
+      numMaps: Int = 1): (StreamingShuffleReader[Int, Int], TempShuffleReadMetrics) = {
     val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
     when(dependency.serializer).thenReturn(serializer)
     when(dependency.aggregator).thenReturn(None)
     when(dependency.keyOrdering).thenReturn(None)
-    val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency)
+    val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency, numMaps)
     val context = MemoryTestingUtils.fakeTaskContext(sc.env)
     val readMetrics = context.taskMetrics().createTempShuffleReadMetrics()
     val reader = new StreamingShuffleReader[Int, Int](
@@ -320,6 +325,37 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
 
       val pairs = reader.read().toList.map(r => (r._1, r._2))
       pairs must contain theSameElementsAs Seq((1, 11), (2, 22))
+    }
+  }
+
+  test("read() resolves endMapIndex=Int.MaxValue (the 5-arg getReader sentinel) to the actual " +
+      "map count and returns every record") {
+    // Regression guard for the production full-read path (QA finding F-1): `ShuffleManager`'s 5-arg
+    // getReader delegates with endMapIndex=Int.MaxValue, meaning "all map outputs of the shuffle".
+    // The reader MUST resolve that sentinel to the real number of maps (the numMaps the manager
+    // captured on the driver and carried in StreamingShuffleHandle);
+    // treating it literally makes `expectedMapCount` ~2.1e9 and the completion gate
+    // `completedMaps.size >= expectedMapCount` unreachable, so a fully-delivered stream would time
+    // out and abort every non-combine streaming job. The other reader tests use only a BOUNDED
+    // endMapIndex (1 or 2), so this is the case that exercises the Int.MaxValue contract.
+    withStreaming { (source, _, exchange, backpressure) =>
+      val numMaps = 4
+      // Drive the reader as the 5-arg getReader does: startMapIndex=0, endMapIndex=Int.MaxValue.
+      val (reader, _) = newReader(
+        exchange, backpressure, source, 0, Int.MaxValue, 0, 1, numMaps = numMaps)
+      // Each of the `numMaps` maps streams one block for partition 0 and then completes. Full
+      // coverage requires a completion from ALL maps -- only reachable once the sentinel resolves
+      // to numMaps (=4) rather than Int.MaxValue.
+      val expected = (0 until numMaps).map { m =>
+        val pair = (m, m * 10)
+        val bytes = serialize(ShuffleBlockId(0, m.toLong, 0), Seq(pair))
+        exchange.publishBlock(metaFor(0, m.toLong, 0, 0L, m, bytes), bytes)
+        exchange.completeMap(0, m.toLong, m, Array(1L))
+        pair
+      }
+
+      val pairs = reader.read().toList.map(r => (r._1, r._2))
+      pairs must contain theSameElementsAs expected
     }
   }
 

@@ -202,10 +202,34 @@ private[spark] class StreamingShuffleReader[K, C](
   // re-entrant resend delivery (this thread) from a producer-thread delivery (any other thread).
   private val consumerThread = new AtomicReference[Thread]()
 
+  // The map-output range this reader consumes, with the `ShuffleManager.getReader` Int.MaxValue
+  // sentinel resolved to a concrete upper bound. The 5-arg `getReader` overload (the common
+  // full-read path) delegates here with endMapIndex = Int.MaxValue, which the contract defines as
+  // "the actual endMapIndex will be changed to the length of total map outputs of the shuffle"
+  // (see ShuffleManager.scala). A LITERAL Int.MaxValue must never be treated as a real map count:
+  // it would make `expectedMapCount` ~2.1e9 and the completion gate (`completedMaps.size >=
+  // expectedMapCount`) permanently unreachable, so a fully-delivered streaming read would falsely
+  // time out and abort every non-combine streaming job (QA finding F-1). We resolve the sentinel to
+  // the authoritative total map count carried on the handle (`StreamingShuffleHandle.numMaps`),
+  // which `StreamingShuffleManager.registerShuffle` captured on the DRIVER as
+  // dependency.rdd.partitions.length -- the same numMaps the DAG scheduler registers with the
+  // MapOutputTracker. It is read from the handle, NOT recomputed here: `ShuffleDependency.rdd` is
+  // @transient and is null once the handle is deserialized on this executor, so `dep.rdd` cannot be
+  // used. It is also deliberately NOT derived from mapOutputTracker.getMapSizesByExecutorId, which
+  // enumerates only maps with NON-EMPTY blocks in [startPartition, endPartition); every map sends
+  // `onMapComplete` to this reader regardless of partition-range coverage (StreamingBlockExchange
+  // routes completion by map index only), so a block-location count would UNDER-count and let a
+  // truncated read complete prematurely. A bounded endMapIndex (e.g. an AQE local shuffle reader
+  // requesting a sub-range of maps) is already concrete and passes through unchanged. Coexistence:
+  // this READS handle metadata captured from the existing dependency only -- the MapOutputTracker
+  // and the DAG scheduler are untouched.
+  private val resolvedEndMapIndex: Int =
+    if (endMapIndex == Int.MaxValue) handle.numMaps else endMapIndex
+
   // Number of producer map tasks this reduce task expects an `onMapComplete` from. Completion (no
   // truncated read) requires a completion signal from EVERY one of these maps, plus every block
   // each of them reports having emitted for this reader's partition range (R1).
-  private val expectedMapCount: Int = math.max(0, endMapIndex - startMapIndex)
+  private val expectedMapCount: Int = math.max(0, resolvedEndMapIndex - startMapIndex)
 
   // Runtime fallback gate (F1). Set true the instant the returned iterator hands a record to the
   // caller. A clean swap to the sort reader is only possible while this is false (nothing has been
@@ -217,15 +241,15 @@ private[spark] class StreamingShuffleReader[K, C](
 
   if (debug) {
     logDebug(s"StreamingShuffleReader created for shuffle $shuffleId partitions " +
-      s"[$startPartition, $endPartition) maps [$startMapIndex, $endMapIndex); inbox bound " +
-      s"$inboxCapacity msgs / $maxInboxBytes bytes")
+      s"[$startPartition, $endPartition) maps [$startMapIndex, $resolvedEndMapIndex); " +
+      s"inbox bound $inboxCapacity msgs / $maxInboxBytes bytes")
   }
 
   // Subscribe to the exchange as the LAST construction step (every field above is initialized, so
   // publishing `this` is safe). The exchange immediately replays any blocks/coverage that arrived
   // before this reader subscribed, and routes all future ones here.
   exchange.registerReader(
-    shuffleId, startMapIndex, endMapIndex, startPartition, endPartition, this)
+    shuffleId, startMapIndex, resolvedEndMapIndex, startPartition, endPartition, this)
 
   // Unsubscribe on task completion (success/failure/cancel) so the exchange never retains
   // routing state for a finished reduce task. Reuses the EXISTING TaskContext lifecycle; no

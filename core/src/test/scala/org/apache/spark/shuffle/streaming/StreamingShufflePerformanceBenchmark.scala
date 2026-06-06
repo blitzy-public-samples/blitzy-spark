@@ -107,7 +107,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase {
     val exchange = new StreamingBlockExchange(conf, spill)
     val backpressure = new BackpressureProtocol(conf, 1, source)
     try {
-      val handle = new StreamingShuffleHandle[Int, Int, Int](0, writerDep)
+      val handle = new StreamingShuffleHandle[Int, Int, Int](0, writerDep, numMaps = 1)
       val wctx = MemoryTestingUtils.fakeTaskContext(sc.env)
       val writer = new StreamingShuffleWriter[Int, Int](
         handle, 0L, wctx, wctx.taskMetrics().shuffleWriteMetrics, conf,
@@ -118,7 +118,7 @@ object StreamingShufflePerformanceBenchmark extends BenchmarkBase {
       var consumed = 0L
       var p = 0
       while (p < numPartitions) {
-        val rHandle = new StreamingShuffleHandle[Int, Int, Int](0, readerDep)
+        val rHandle = new StreamingShuffleHandle[Int, Int, Int](0, readerDep, numMaps = 1)
         val rctx = MemoryTestingUtils.fakeTaskContext(sc.env)
         val reader = new StreamingShuffleReader[Int, Int](
           rHandle, 0, 1, p, p + 1, rctx, rctx.taskMetrics().createTempShuffleReadMetrics(),

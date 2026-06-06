@@ -36,17 +36,33 @@ import org.apache.spark.shuffle.BaseShuffleHandle
  * type `V`), this handle carries the full `[K, V, C]` type triple so the manager can recover and
  * dispatch the reader's combiner type `C`.
  *
- * This is a pure dispatch marker: it introduces no state or behavior beyond the `shuffleId` and
- * the [[ShuffleDependency]] already captured by [[BaseShuffleHandle]].
+ * Beyond the dispatch role, the handle carries one piece of pre-computed shuffle metadata that
+ * the executor-side [[StreamingShuffleReader]] cannot otherwise obtain: `numMaps`, the total
+ * number of producer map tasks for this shuffle. It is captured by
+ * `StreamingShuffleManager.registerShuffle` on the DRIVER (where `dependency.rdd` is non-null) as
+ * `dependency.rdd.partitions.length` -- the same map count the DAG scheduler registers with the
+ * `MapOutputTracker`. It MUST travel inside the handle: `ShuffleDependency.rdd` is `@transient`,
+ * so it is null once the handle is deserialized on an executor, leaving the reader no way to
+ * recompute the count from the dependency. The reader uses it to resolve the
+ * `ShuffleManager.getReader(endMapIndex = Int.MaxValue)` "all maps" sentinel into a concrete
+ * completion target (QA finding F-1). As a plain `Int` field of this `Serializable` handle it is
+ * carried to executors automatically, so no MapOutputTracker RPC and no scheduler change are
+ * needed -- preserving the coexistence/least-modification discipline.
+ *
+ * The handle remains a thin, immutable data carrier: it stores `numMaps` and adds no behavior
+ * beyond the `shuffleId` and the [[ShuffleDependency]] already captured by [[BaseShuffleHandle]].
  *
  * @param shuffleId the unique identifier of the shuffle, forwarded to [[BaseShuffleHandle]]
  * @param dependency the [[ShuffleDependency]] describing this shuffle, forwarded to the superclass
+ * @param numMaps the total number of producer map tasks for this shuffle, captured on the driver so
+ *                the executor-side reader can resolve the `endMapIndex = Int.MaxValue` sentinel
  * @tparam K the type of the keys being shuffled
  * @tparam V the type of the map-output values
  * @tparam C the type of the combined values produced on the reduce side
  */
 private[spark] class StreamingShuffleHandle[K, V, C](
     shuffleId: Int,
-    dependency: ShuffleDependency[K, V, C])
+    dependency: ShuffleDependency[K, V, C],
+    val numMaps: Int)
   extends BaseShuffleHandle[K, V, C](shuffleId, dependency) {
 }
