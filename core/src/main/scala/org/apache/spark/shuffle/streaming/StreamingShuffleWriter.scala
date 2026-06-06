@@ -25,7 +25,7 @@ import org.apache.spark._
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.SerializationStream
-import org.apache.spark.shuffle.{ShuffleChecksumUtils, ShuffleWriteMetricsReporter, ShuffleWriter}
+import org.apache.spark.shuffle.{ShuffleWriteMetricsReporter, ShuffleWriter}
 import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
 
 /**
@@ -54,11 +54,11 @@ import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
  *  3. Flow control: block emission is paced through the shared [[BackpressureProtocol]]
  *     token-bucket rate limiter, and producer throughput is fed back to its heartbeat loop so a
  *     sustained consumer slowdown can trigger graceful fallback to sort-based shuffle.
- *  4. CRC32C integrity: each block carries a checksum computed through the EXISTING
- *     [[org.apache.spark.shuffle.ShuffleChecksumUtils]] facility using the configured
- *     `spark.shuffle.checksum.algorithm` (CRC32C when so configured), the same facility sort-based
- *     shuffle uses, so the [[StreamingShuffleReader]] can validate every block and request
- *     retransmission on corruption. No new checksum implementation is introduced.
+ *  4. CRC32C integrity: each block carries a checksum computed through
+ *     [[StreamingShuffleChecksum]], which delegates to the EXISTING Spark checksum facility using
+ *     the configured `spark.shuffle.checksum.algorithm` (CRC32C when so configured), the same
+ *     facility sort-based shuffle uses, so the [[StreamingShuffleReader]] can validate every block
+ *     and request retransmission on corruption. No new checksum implementation is introduced.
  *
  * Output discovery: on a successful write the map task emits a standard [[MapStatus]] built through
  * the `object MapStatus` factory, so the UNMODIFIED `MapOutputTracker` and DAG scheduler locate
@@ -151,7 +151,8 @@ private[spark] class StreamingShuffleWriter[K, V](
 
   // Checksum algorithm for per-block integrity (CRC32C when so configured). Reuses the EXISTING
   // shuffle checksum config rather than introducing a new one; passed verbatim to
-  // ShuffleChecksumUtils.computeChecksum.
+  // StreamingShuffleChecksum.computeChecksum, which delegates to the existing Spark checksum
+  // facility (ShuffleChecksumHelper) -- no new checksum implementation is introduced.
   private val checksumAlgorithm: String = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
 
   // Verbose debug-logging gate (spark.shuffle.streaming.debug). Held off the hot path so
@@ -355,10 +356,11 @@ private[spark] class StreamingShuffleWriter[K, V](
           s"$numBytes bytes across $records record(s), over the $cap-byte pipelined block cap; " +
           "it cannot be split, so falling back to sort-based shuffle")
     }
-    // Coexistence (integrity): compute the block checksum through the EXISTING ShuffleChecksumUtils
-    // facility (CRC32C when so configured) over the EXACT bytes the reader validates -- the same
-    // facility sort-based shuffle uses; no new checksum implementation is introduced.
-    val checksumValue = ShuffleChecksumUtils.computeChecksum(checksumAlgorithm, bytes)
+    // Coexistence (integrity): compute the block checksum through StreamingShuffleChecksum, which
+    // delegates to the EXISTING Spark checksum facility (ShuffleChecksumHelper, CRC32C when so
+    // configured), over the EXACT bytes the reader validates -- the same underlying facility
+    // sort-based shuffle uses; no new checksum implementation is introduced.
+    val checksumValue = StreamingShuffleChecksum.computeChecksum(checksumAlgorithm, bytes)
     // Flow control BEFORE emit: a sustained consumer slowdown (the >60s, 2x-slower signal) means
     // streaming can no longer keep up, so fall back to sort rather than emit into a stalled path.
     if (backpressure.shouldFallback) {

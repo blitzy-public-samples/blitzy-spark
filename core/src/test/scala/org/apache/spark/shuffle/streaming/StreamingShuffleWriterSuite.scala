@@ -31,7 +31,6 @@ import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.shuffle.IndexShuffleBlockResolver
-import org.apache.spark.shuffle.ShuffleChecksumUtils
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.util.Utils
 
@@ -332,7 +331,7 @@ class StreamingShuffleWriterSuite
     }
   }
 
-  test("computes block checksums using the standard ShuffleChecksumUtils facility (CRC32C)") {
+  test("computes block checksums using the standard Spark checksum facility (CRC32C)") {
     val originalAlgorithm = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
     conf.set(config.SHUFFLE_CHECKSUM_ALGORITHM.key, "CRC32C")
     val exchange = stubbedExchange(granted = true)
@@ -346,9 +345,10 @@ class StreamingShuffleWriterSuite
       val publishedBytes = bytesCaptor.getValue
       val publishedMeta = metaCaptor.getValue
       // Recompute the checksum over the EXACT published bytes through the SAME standard facility
-      // the production writer uses -- ShuffleChecksumUtils. Equality proves the writer reuses this
-      // exact facility (the AAP-mandated checksum utility) and introduces no new checksum.
-      val expectedChecksum = ShuffleChecksumUtils.computeChecksum(
+      // the production writer uses -- StreamingShuffleChecksum, which delegates to the existing
+      // Spark checksum facility. Equality proves the writer reuses this exact facility (no new
+      // checksum implementation is introduced).
+      val expectedChecksum = StreamingShuffleChecksum.computeChecksum(
         conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM), publishedBytes)
       publishedMeta.checksum mustBe expectedChecksum
     } finally {

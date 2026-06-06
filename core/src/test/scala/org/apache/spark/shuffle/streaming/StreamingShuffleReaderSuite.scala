@@ -31,7 +31,6 @@ import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.shuffle.{FetchFailedException, IndexShuffleBlockResolver}
-import org.apache.spark.shuffle.ShuffleChecksumUtils
 import org.apache.spark.shuffle.streaming.MemorySpillManager.BlockKey
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
@@ -48,8 +47,8 @@ import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
  * Coverage maps to the streaming-reader requirements in the feature plan:
  *  - read() returns a LAZY/blocking iterator: constructing it performs no eager fetching, and the
  *    streamed records (and the read-metrics they report) appear only as the iterator is drained.
- *  - every received block is validated with CRC32C via the EXISTING
- *    [[org.apache.spark.shuffle.ShuffleChecksumUtils]] facility; a corrupt block is re-requested by
+ *  - every received block is validated with CRC32C via [[StreamingShuffleChecksum]], which
+ *    delegates to the EXISTING Spark checksum facility; a corrupt block is re-requested by
  *    its addressable key and the retained block is resent and
  *    consumed successfully, within the bounded retry budget and with no invalidation.
  *  - a producer failure is turned into an atomic partial-read invalidation that throws
@@ -85,10 +84,11 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     out.toByteArray
   }
 
-  // Compute a block's checksum through the EXISTING ShuffleChecksumUtils facility (CRC32C), exactly
-  // as the producer does, so the reader's validation accepts an uncorrupted block.
+  // Compute a block's checksum through StreamingShuffleChecksum (which delegates to the EXISTING
+  // Spark checksum facility, CRC32C), exactly as the producer does, so the reader's validation
+  // accepts an uncorrupted block.
   private def checksumOf(bytes: Array[Byte]): Long =
-    ShuffleChecksumUtils.computeChecksum(conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM), bytes)
+    StreamingShuffleChecksum.computeChecksum(conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM), bytes)
 
   // Build the end-to-end block metadata a producer would attach to a streamed block.
   private def metaFor(

@@ -27,7 +27,6 @@ import scala.util.control.NonFatal
 import org.apache.spark._
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
-import org.apache.spark.shuffle.ShuffleChecksumUtils
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.{BlockMeta, StreamingBlockConsumer}
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.CompletionIterator
@@ -61,8 +60,8 @@ import org.apache.spark.util.collection.ExternalSorter
  *     producer blocks in the delivery callback (backpressure) rather than accumulating
  *     unbounded arrays.
  *  3. CRC32C integrity with block-specific retransmission: every received block is validated
- *     through the EXISTING [[org.apache.spark.shuffle.ShuffleChecksumUtils]] facility (CRC32C). A
- *     corrupt block is re-requested by
+ *     through [[StreamingShuffleChecksum]], which delegates to the EXISTING Spark checksum
+ *     facility (CRC32C). A corrupt block is re-requested by
  *     its addressable key via [[StreamingBlockExchange.requestResend]] with exponential backoff
  *     (start 1s, doubling) up to [[BackpressureProtocol.MAX_RETRY_ATTEMPTS]] attempts before the
  *     read is invalidated.
@@ -578,8 +577,9 @@ private[spark] class StreamingShuffleReader[K, C](
     private def receiveChunk(chunk: BlockChunk): Iterator[(Any, Any)] = {
       var current = chunk
       var attempts = 1
-      // Coexistence: integrity is verified through the EXISTING ShuffleChecksumUtils facility
-      // (CRC32C), the same facility sort-based shuffle uses; no new checksum impl is introduced.
+      // Coexistence: integrity is verified through StreamingShuffleChecksum, which delegates to the
+      // EXISTING Spark checksum facility (CRC32C), the same underlying facility sort-based shuffle
+      // uses; no new checksum impl is introduced.
       while (!validateChecksum(current.bytes, current.meta.checksum)) {
         if (attempts >= MaxRetryAttempts) {
           // Unrecoverable corruption after the full retry budget: invalidate atomically.
@@ -669,10 +669,11 @@ private[spark] class StreamingShuffleReader[K, C](
     }
   }
 
-  // Recompute the block checksum through the EXISTING ShuffleChecksumUtils facility and compare it
-  // to the producer-computed value transmitted with the block. CRC32C by default (configurable).
+  // Recompute the block checksum through StreamingShuffleChecksum (which delegates to the existing
+  // Spark checksum facility) and compare it to the producer-computed value transmitted with the
+  // block. CRC32C by default (configurable).
   private def validateChecksum(bytes: Array[Byte], expected: Long): Boolean =
-    ShuffleChecksumUtils.computeChecksum(checksumAlgorithm, bytes) == expected
+    StreamingShuffleChecksum.computeChecksum(checksumAlgorithm, bytes) == expected
 
   // Classify a producer address as local (same executor) when a running SparkEnv is available,
   // otherwise treat it as remote. Used only to attribute read metrics to the right counters.
