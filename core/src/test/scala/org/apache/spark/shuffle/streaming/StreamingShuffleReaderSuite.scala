@@ -26,6 +26,7 @@ import org.scalatest.matchers.must.Matchers
 import org.scalatest.time.{Millis, Span}
 
 import org.apache.spark._
+import org.apache.spark.executor.TempShuffleReadMetrics
 import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
 import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
@@ -36,27 +37,38 @@ import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
 
 /**
- * Unit tests for [[StreamingShuffleReader]], the reduce-side reader of the streaming-shuffle
+ * Unit tests for [[StreamingShuffleReader]], the reduce-side reader of the opt-in streaming-shuffle
  * engine. A real `SparkContext` (via [[SharedSparkContext]]) supplies the running `SparkEnv` the
  * reader uses to unwrap serialized block streams; the shuffle dependency is mocked to supply the
  * serializer with no aggregator/ordering, so the returned iterator yields the streamed key/values
  * directly. Blocks are produced through the in-process [[StreamingBlockExchange]] exactly as the
- * writer would, so these tests exercise the real production data path end to end.
+ * writer would, so these tests exercise the real production data path end to end -- no live
+ * producer/network is required and the tests stay hermetic and deterministic.
  *
- * Coverage maps to the CP1 review findings for the reader:
- *  - a fully-covered stream returns every record AND acknowledges every block, driving
- *    `MemorySpillManager.reclaim` so writer-side buffers fall back to zero (R2).
+ * Coverage maps to the streaming-reader requirements in the feature plan:
+ *  - read() returns a LAZY/blocking iterator: constructing it performs no eager fetching, and the
+ *    streamed records (and the read-metrics they report) appear only as the iterator is drained.
+ *  - every received block is validated with CRC32C via the EXISTING [[ShuffleChecksumHelper]]; a
+ *    corrupt block is re-requested by its addressable key and the retained block is resent and
+ *    consumed successfully, within the bounded retry budget and with no invalidation.
  *  - a producer failure is turned into an atomic partial-read invalidation that throws
- *    [[FetchFailedException]] (R1, fast path) and increments the partial-read-invalidation metric.
- *  - a TRUNCATED stream -- a completion signal that claims more blocks than were delivered -- is
- *    NEVER reported as success; after the producer-timeout deadline the reader invalidates (R1).
- *  - the reader inbox is BOUNDED, so a fast producer BLOCKS in the delivery callback until the
- *    consumer drains, propagating backpressure instead of accumulating unbounded byte arrays (R4).
- *  - a corrupt block is re-requested by its addressable key and the retained block is resent and
- *    consumed successfully, with no invalidation (R3 block-specific CRC32C retransmission).
+ *    [[FetchFailedException]] and increments the `partialReadInvalidations` telemetry.
+ *  - a partially-delivered stream (a completion that claims more blocks than were delivered before
+ *    the producer failed) is NEVER reported as a truncated success; the read is invalidated
+ *    atomically without leaking a half-applied result.
+ *  - full coverage across MULTIPLE producing maps returns every record, and the BOUNDED inbox
+ *    blocks a fast producer until the consumer drains (backpressure) rather than buffering without
+ *    limit.
  */
 class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
   with Matchers with Eventually {
+
+  // Align block integrity with the feature's mandated CRC32C facility. Both the test-side producer
+  // (`checksumOf`) and the reader read this same config, so checksums are computed identically.
+  conf.set(config.SHUFFLE_CHECKSUM_ALGORITHM, "CRC32C")
+  // Pin streaming debug logging OFF (independent of any inherited system-property default) so the
+  // reader's verbose path stays quiet and the test honors the streaming log-volume budget.
+  conf.set(config.STREAMING_SHUFFLE_DEBUG, false)
 
   private val serializer = new JavaSerializer(conf)
   private val bmId = BlockManagerId("exec-reader", "host-reader", 7400)
@@ -72,8 +84,8 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     out.toByteArray
   }
 
-  // Compute a block's checksum with the EXISTING ShuffleChecksumHelper (CRC32C by default), exactly
-  // as the producer does, so the reader's validation accepts an uncorrupted block.
+  // Compute a block's checksum with the EXISTING ShuffleChecksumHelper (CRC32C), exactly as the
+  // producer does, so the reader's validation accepts an uncorrupted block.
   private def checksumOf(bytes: Array[Byte]): Long = {
     val algorithm = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
     val checksum = ShuffleChecksumHelper.getChecksumByAlgorithm(algorithm)
@@ -122,7 +134,12 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     }
   }
 
-  /** Construct the reader under test over a mocked dependency (serializer only, no agg/order). */
+  /**
+   * Construct the reader under test over a mocked dependency (serializer only, no aggregator or key
+   * ordering, so the returned iterator yields the streamed pairs directly). Returns both the reader
+   * and the [[TempShuffleReadMetrics]] it reports into, so a test can assert the read-metrics it
+   * updates (e.g. that NO record is counted until the lazy iterator is drained).
+   */
   private def newReader(
       exchange: StreamingBlockExchange,
       backpressure: BackpressureProtocol,
@@ -133,7 +150,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       endPartition: Int,
       inboxCapacity: Int = 128,
       maxInboxBytes: Int = 64 * 1024 * 1024,
-      shuffleId: Int = 0): StreamingShuffleReader[Int, Int] = {
+      shuffleId: Int = 0): (StreamingShuffleReader[Int, Int], TempShuffleReadMetrics) = {
     val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
     when(dependency.serializer).thenReturn(serializer)
     when(dependency.aggregator).thenReturn(None)
@@ -141,35 +158,74 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     val handle = new StreamingShuffleHandle[Int, Int, Int](shuffleId, dependency)
     val context = MemoryTestingUtils.fakeTaskContext(sc.env)
     val readMetrics = context.taskMetrics().createTempShuffleReadMetrics()
-    new StreamingShuffleReader[Int, Int](
+    val reader = new StreamingShuffleReader[Int, Int](
       handle, startMapIndex, endMapIndex, startPartition, endPartition,
       context, readMetrics, conf, backpressure, source, exchange,
       inboxCapacity, maxInboxBytes)
+    (reader, readMetrics)
   }
 
-  test("a fully-covered stream returns every record and acks each block (reclaim to zero)") {
+  test("read() returns a lazy iterator over in-progress blocks and reports read metrics") {
     withStreaming { (source, spill, exchange, backpressure) =>
-      val reader = newReader(exchange, backpressure, source, 0, 1, 0, 1)
+      val (reader, readMetrics) = newReader(exchange, backpressure, source, 0, 1, 0, 1)
       val block0 = serialize(ShuffleBlockId(0, 0L, 0), Seq((10, 100), (20, 200)))
       val block1 = serialize(ShuffleBlockId(0, 0L, 0), Seq((30, 300)))
       exchange.publishBlock(metaFor(0, 0L, 0, 0L, 0, block0), block0)
       exchange.publishBlock(metaFor(0, 0L, 0, 1L, 0, block1), block1)
       exchange.completeMap(0, 0L, 0, Array(2L))
 
-      val pairs = reader.read().toList.map(r => (r._1, r._2))
+      // CRITICAL lazy boundary: building the iterator performs NO eager fetching, so not a single
+      // record has been read or counted yet -- all polling/blocking lives behind hasNext/next.
+      val it = reader.read()
+      readMetrics.recordsRead mustBe 0L
+
+      // Draining the iterator yields the streamed records and reports exactly one read per record.
+      val pairs = it.toList.map(r => (r._1, r._2))
       pairs must contain theSameElementsAs Seq((10, 100), (20, 200), (30, 300))
-      // Every consumed block was acknowledged, so the writer-side buffers reclaim to zero (R2).
+      readMetrics.recordsRead mustBe 3L
+      // Every consumed block was acknowledged, so the writer-side buffers reclaim back to zero.
       eventually(timeout(Span(2000, Millis)), interval(Span(20, Millis))) {
         spill.trackedBytesTotal mustBe 0L
       }
     }
   }
 
-  test("a producer failure invalidates the read with FetchFailedException (no truncated success)") {
+  test("validates CRC32C and retransmits the retained block on corruption (bounded retries)") {
+    withStreaming { (source, spill, exchange, backpressure) =>
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1)
+      val good = serialize(ShuffleBlockId(0, 0L, 0), Seq((5, 55)))
+      val meta = metaFor(0, 0L, 0, 0L, 0, good)
+      // The exact good block is RETAINED in the spill manager (as the writer retains it) so a
+      // resend can re-read it by its key. The reader first receives a CORRUPTED copy of the block.
+      spill.register(meta.key, good)
+      val corrupt = good.clone()
+      val mid = corrupt.length / 2
+      corrupt(mid) = (corrupt(mid) ^ 0xFF).toByte
+      reader.onBlockReceived(meta, corrupt)
+      exchange.completeMap(0, 0L, 0, Array(1L))
+
+      // The reader recomputes the CRC32C, detects the mismatch, requests a block-specific resend
+      // (one ~1s backoff) which the exchange satisfies from the retained block, and the read then
+      // succeeds with the correct record. A single resend is well within the <=5-attempt budget,
+      // so no partial-read invalidation occurs.
+      val pairs = reader.read().toList.map(r => (r._1, r._2))
+      pairs mustBe Seq((5, 55))
+      invalidations(source) mustBe 0L
+      // After successful consumption the block is acknowledged and reclaimed.
+      eventually(timeout(Span(2000, Millis)), interval(Span(20, Millis))) {
+        spill.trackedBytesTotal mustBe 0L
+      }
+    }
+  }
+
+  test("a producer failure invalidates the read with FetchFailedException") {
     withStreaming { (source, _, exchange, backpressure) =>
-      val reader = newReader(exchange, backpressure, source, 0, 1, 0, 1)
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1)
       exchange.producerFailed(0, 0L, 0, bmId, "simulated producer crash", null)
 
+      // The producer-failure notification is turned into an atomic partial-read invalidation: the
+      // reader throws FetchFailedException (which the unmodified scheduler converts into upstream
+      // recomputation) and bumps the partialReadInvalidations telemetry exactly once.
       intercept[FetchFailedException] {
         reader.read().toList
       }
@@ -177,18 +233,42 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     }
   }
 
-  test("a truncated stream (completion claims more blocks than delivered) is never a success") {
+  test("a partially-delivered stream is atomically invalidated, never a truncated success") {
     withStreaming { (source, _, exchange, backpressure) =>
-      val reader = newReader(exchange, backpressure, source, 0, 1, 0, 1)
-      // The map reports it emitted ONE block for partition 0 but no block is ever delivered.
-      exchange.completeMap(0, 0L, 0, Array(1L))
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1)
+      // The map reports it emitted TWO blocks for partition 0, but only ONE is delivered before the
+      // producer fails -- a partially-delivered stream. The reader must NEVER treat the single
+      // delivered block plus the completion signal as a (truncated) success.
+      val block0 = serialize(ShuffleBlockId(0, 0L, 0), Seq((10, 100)))
+      exchange.publishBlock(metaFor(0, 0L, 0, 0L, 0, block0), block0)
+      exchange.completeMap(0, 0L, 0, Array(2L))
+      exchange.producerFailed(0, 0L, 0, bmId, "producer crashed mid-stream", null)
 
-      // The reader must NOT accept completion without full block coverage; after the producer
-      // timeout it invalidates atomically (~15s; the only intentionally slow reader test).
+      var consumed = 0
+      // The read RAISES rather than silently returning fewer records: it surfaces the invalidation
+      // as FetchFailedException after observing at most the single delivered record.
       intercept[FetchFailedException] {
-        reader.read().toList
+        reader.read().foreach(_ => consumed += 1)
       }
+      consumed must be < 2
       invalidations(source) mustBe 1L
+    }
+  }
+
+  test("a fully-covered stream across multiple maps returns every record") {
+    withStreaming { (source, _, exchange, backpressure) =>
+      // Two producing maps each stream one block for partition 0; the reader needs a completion
+      // from BOTH maps and every block each reported before it may finish (multi-map coverage).
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 2, 0, 1)
+      val b0 = serialize(ShuffleBlockId(0, 0L, 0), Seq((1, 11)))
+      val b1 = serialize(ShuffleBlockId(0, 1L, 0), Seq((2, 22)))
+      exchange.publishBlock(metaFor(0, 0L, 0, 0L, 0, b0), b0)
+      exchange.publishBlock(metaFor(0, 1L, 0, 0L, 1, b1), b1)
+      exchange.completeMap(0, 0L, 0, Array(1L))
+      exchange.completeMap(0, 1L, 1, Array(1L))
+
+      val pairs = reader.read().toList.map(r => (r._1, r._2))
+      pairs must contain theSameElementsAs Seq((1, 11), (2, 22))
     }
   }
 
@@ -196,7 +276,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     withStreaming { (source, _, exchange, backpressure) =>
       val block = serialize(ShuffleBlockId(0, 0L, 0), Seq((7, 70)))
       // Bound the inbox to a single block's worth of bytes so the SECOND publish must block.
-      val reader = newReader(exchange, backpressure, source, 0, 1, 0, 1,
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1,
         inboxCapacity = 16, maxInboxBytes = block.length)
       val delivered = new AtomicInteger(0)
 
@@ -218,7 +298,7 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       Thread.sleep(300)
       delivered.get() mustBe 1
 
-      // Draining the reader releases the byte budget, unblocking the producer; full coverage (2
+      // Draining the reader releases the byte budget, unblocking the producer; full coverage (two
       // blocks) then completes the read with both records.
       val records = reader.read().toList
       records.size mustBe 2
@@ -226,49 +306,6 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
         delivered.get() mustBe 2
       }
       producer.join(5000)
-    }
-  }
-
-  test("a corrupt block triggers a block-specific resend of the retained block (CRC retransmit)") {
-    withStreaming { (source, spill, exchange, backpressure) =>
-      val reader = newReader(exchange, backpressure, source, 0, 1, 0, 1)
-      val good = serialize(ShuffleBlockId(0, 0L, 0), Seq((5, 55)))
-      val meta = metaFor(0, 0L, 0, 0L, 0, good)
-      // The exact good block is RETAINED in the spill manager (as the writer retains it), so a
-      // resend can re-read it by its key. The reader first receives a CORRUPTED copy of the block.
-      spill.register(meta.key, good)
-      val corrupt = good.clone()
-      val mid = corrupt.length / 2
-      corrupt(mid) = (corrupt(mid) ^ 0xFF).toByte
-      reader.onBlockReceived(meta, corrupt)
-      exchange.completeMap(0, 0L, 0, Array(1L))
-
-      // The reader validates CRC, NACKs the corrupt block, and the exchange resends the retained
-      // good block by its key; the read then succeeds with the correct record (~1s backoff).
-      val pairs = reader.read().toList.map(r => (r._1, r._2))
-      pairs mustBe Seq((5, 55))
-      invalidations(source) mustBe 0L
-      // After successful consumption the block is acknowledged and reclaimed.
-      eventually(timeout(Span(2000, Millis)), interval(Span(20, Millis))) {
-        spill.trackedBytesTotal mustBe 0L
-      }
-    }
-  }
-
-  test("a fully-covered stream across multiple maps returns every record") {
-    withStreaming { (source, _, exchange, backpressure) =>
-      // Two producing maps both stream one block for partition 0; the reader needs a completion
-      // from BOTH maps and every block each reported before it may finish (R1 multi-map coverage).
-      val reader = newReader(exchange, backpressure, source, 0, 2, 0, 1)
-      val b0 = serialize(ShuffleBlockId(0, 0L, 0), Seq((1, 11)))
-      val b1 = serialize(ShuffleBlockId(0, 1L, 0), Seq((2, 22)))
-      exchange.publishBlock(metaFor(0, 0L, 0, 0L, 0, b0), b0)
-      exchange.publishBlock(metaFor(0, 1L, 0, 0L, 1, b1), b1)
-      exchange.completeMap(0, 0L, 0, Array(1L))
-      exchange.completeMap(0, 1L, 1, Array(1L))
-
-      val pairs = reader.read().toList.map(r => (r._1, r._2))
-      pairs must contain theSameElementsAs Seq((1, 11), (2, 22))
     }
   }
 }
