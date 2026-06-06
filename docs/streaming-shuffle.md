@@ -31,28 +31,31 @@ in-memory buffers governed by a backpressure protocol, instead of materializing 
 data to disk the way the default sort-based shuffle does. By avoiding the disk round-trip for
 intermediate data, it shortens the critical path of shuffle-heavy stages.
 
-> **Availability at this release.** This release ships the streaming-shuffle **data-plane
-> components** and an **in-process data path**; the cluster-wide **activation surface is staged for
-> a later checkpoint**. Concretely:
+> **Availability at this release.** `spark.shuffle.manager=streaming` is now **selectable**: this
+> release ships the full control plane and an end-to-end data path. Concretely:
 >
-> - **Implemented now:** the streaming `ShuffleWriter` and `ShuffleReader`, the
->   `StreamingShuffleHandle` dispatch marker, the `BackpressureProtocol`, the `MemorySpillManager`
->   (with on-disk spill and read-back), the `StreamingShuffleSource` metrics source, and a
->   package-private `StreamingBlockExchange` that connects writer block emission to reader
->   consumption -- providing per-partition buffering, CRC32C integrity, block-specific
->   retransmission, consumer-acknowledged buffer reclamation, and coverage-based partial-read
->   invalidation.
-> - **Planned for a later checkpoint:** the `StreamingShuffleManager` itself and its registration in
->   the shuffle-manager factory map (so `spark.shuffle.manager=streaming` is **not yet selectable**),
->   and the distributed `TransportContext`-backed wire transport that will carry blocks across
->   executors. The current `StreamingBlockExchange` is the in-process realization that the
->   distributed transport will replace behind the same consumer contract.
+> - **Implemented now:** the `StreamingShuffleManager` and its registration in the shuffle-manager
+>   factory map (so `spark.shuffle.manager=streaming` selects it); the two-fold opt-in and the
+>   manager-driven **automatic runtime fallback** to a composed `SortShuffleManager`; the streaming
+>   `ShuffleWriter` and `ShuffleReader`; the `StreamingShuffleHandle` dispatch marker; the
+>   `BackpressureProtocol`; the `MemorySpillManager` (with on-disk spill and read-back); the
+>   `StreamingShuffleSource` metrics source; the package-private `StreamingBlockExchange` data path
+>   (per-partition buffering, CRC32C integrity, block-specific retransmission, consumer-acknowledged
+>   buffer reclamation, and coverage-based partial-read invalidation); and a
+>   `TransportContext`-backed `StreamingShuffleTransport` that carries blocks, acks, resends, and
+>   completion/failure signals across executor boundaries by reusing Spark's existing Netty stack.
+> - **Current limitations (v1):** discovering *which* executor hosts a given producer (the
+>   producer-host/port rendezvous) is a scheduler/`MapOutputTracker` concern that is out of scope for
+>   this feature, so the cross-executor transport is wired and exercised through the exchange's
+>   subscribe/publish API but is not yet auto-driven by the scheduler; the reader-side fallback is
+>   duplication-free only before the first record is yielded to the consumer (a later switch falls
+>   back via the existing `FetchFailedException` recomputation path); and a few documented fallback
+>   conditions (link-saturation and producer/consumer version mismatch) remain heuristic rather than
+>   automatic triggers. Configuration changes require an executor restart (no dynamic reconfiguration
+>   in this version).
 >
-> Until the manager and its factory registration land, setting `spark.shuffle.manager=streaming`
-> has no effect and Spark continues to use the default sort-based shuffle. The configuration keys,
-> metric names, and class names documented below are final and match the code in this release;
-> sections that describe **manager selection** or **distributed transport** are marked as planned
-> accordingly.
+> The configuration keys, metric names, and class names documented below are final and match the
+> code in this release.
 
 **Performance objective.** The engine targets a **30-50% end-to-end latency reduction** for
 shuffle-bound workloads (10GB+ of shuffle data, 100+ partitions) and a **5-10%** improvement for
@@ -62,16 +65,17 @@ CPU-bound workloads.
 default `SortShuffleManager`**. Sort-based shuffle remains the default engine and is the designated
 automatic fallback, so workloads that do not benefit from streaming see zero regression. The
 per-shuffle automatic fallback is performed by the `StreamingShuffleManager` by delegating to a
-composed `SortShuffleManager`; because the manager is staged for a later checkpoint (see the
-**Availability** note above), the fallback *signals* described below (slow-consumer detection,
-oversize-record and admission fallback) are computed in this release, while the manager-level revert
-that consumes them lands with the manager.
+composed `SortShuffleManager`: at registration time when streaming is disabled or the shuffle is
+unsupported (for example it requires map-side combine), and at run time when a fallback signal fires
+(a sustained-slow consumer, an admission/memory-pressure timeout, or an oversize unsplittable block).
+In every case the affected task still produces a standard `MapStatus`, so the scheduler and
+`MapOutputTracker` are unaffected.
 
 Activation is **two-fold** (see the [Configuration](#configuration) section below and the
 [Shuffle Behavior](configuration.html#shuffle-behavior) rows of the configuration guide): you must
-select the streaming manager AND set the streaming feature flag. Manager selection
-(`spark.shuffle.manager=streaming`) becomes available with the later-checkpoint manager; until then,
-neither setting activates streaming and Spark uses the default sort-based shuffle.
+select the streaming manager (`spark.shuffle.manager=streaming`) AND set the streaming feature flag
+(`spark.shuffle.streaming.enabled=true`). Selecting the manager without the flag delegates every
+shuffle to the composed sort-based engine, so streaming is never engaged until both are set.
 
 # Architecture
 
@@ -81,49 +85,54 @@ no existing class imports or depends on the streaming classes. The feature plugs
 Spark machinery **entirely within the `ShuffleManager` abstraction boundary**. There are only two
 integration points:
 
-1. The `ShuffleManager` factory map, which (in the later checkpoint that adds the manager) resolves
-   `spark.shuffle.manager=streaming` to `StreamingShuffleManager`. This release does not yet modify
-   the factory map, so the name is not yet selectable.
-2. The configuration registry, which exposes the `spark.shuffle.streaming.*` properties. These
-   entries are present in this release.
+1. The `ShuffleManager` factory map, which resolves `spark.shuffle.manager=streaming` to
+   `StreamingShuffleManager`. This single map entry is the only production change outside the
+   streaming package besides the configuration keys.
+2. The configuration registry, which exposes the `spark.shuffle.streaming.*` properties.
 
 Everything else -- `SparkEnv`, the DAG scheduler, the task lifecycle, the user-facing
 RDD/DataFrame/Dataset APIs, and the executor memory model -- is unchanged and reused through its
-existing interfaces. The network transport is likewise reused without modification; in this release
-the producer-to-consumer data path is the in-process `StreamingBlockExchange`, and the distributed
-`TransportContext`-backed transport is added in a later checkpoint behind the same consumer
-contract.
+existing interfaces. The network transport is likewise reused without modification: blocks move
+across executors over a `StreamingShuffleTransport` that is built on Spark's existing
+`TransportContext`, and when no transport is bound (for example in a single-JVM unit test) the
+same `StreamingBlockExchange` contract serves co-located producers and consumers in-process.
 
 ## Components
 
-The engine is composed of the following classes, all in `org.apache.spark.shuffle.streaming`. All
-except `StreamingShuffleManager` are present in this release; the manager is staged for a later
-checkpoint (see the **Availability** note in the [Overview](#overview)).
+The engine is composed of the following classes, all in `org.apache.spark.shuffle.streaming`, and
+all present in this release.
 
-- `StreamingShuffleManager` *(planned, later checkpoint)* -- implements the `ShuffleManager` trait
-  (constructor `(conf, isDriver)`). It dispatches the streaming writer and reader and **composes a
+- `StreamingShuffleManager` -- implements the `ShuffleManager` trait (constructor
+  `(conf, isDriver)`). It dispatches the streaming writer and reader and **composes a
   `SortShuffleManager` instance for graceful fallback**, delegating to it whenever streaming is
-  disabled or a fallback condition fires. This class is not present in this release, so streaming is
-  not yet selectable as a shuffle manager.
+  disabled, the shuffle is unsupported, or a runtime fallback condition fires. Selecting
+  `spark.shuffle.manager=streaming` resolves to this class.
 - `StreamingShuffleHandle` -- extends `BaseShuffleHandle`; a lightweight dispatch marker whose
   presence makes the manager route a shuffle to the streaming writer/reader. It mirrors how
   `SerializedShuffleHandle` and `BypassMergeSortShuffleHandle` mark sort-path variants; any other
   handle type is delegated to the composed `SortShuffleManager`.
 - `StreamingShuffleWriter` -- extends `ShuffleWriter`; partitions records into bounded
-  per-partition in-memory buffers, publishes blocks to consumers through the in-process
-  `StreamingBlockExchange` (the distributed `TransportContext`-backed transport replaces the
-  exchange in a later checkpoint), computes CRC32C integrity checks, coordinates backpressure and
-  spill, and emits a standard `MapStatus`.
+  per-partition in-memory buffers, publishes blocks to consumers through the `StreamingBlockExchange`
+  (which routes to co-located readers in-process or to remote readers over the
+  `TransportContext`-backed transport), computes CRC32C integrity checks, coordinates backpressure
+  and spill, and emits a standard `MapStatus`. When a fallback condition fires it raises an internal
+  signal that the manager catches to degrade the task to sort-based shuffle.
 - `StreamingShuffleReader` -- implements `ShuffleReader`; returns a lazy/blocking iterator that
   consumes in-progress blocks from a bounded inbox, validates CRC32C (requesting a block-specific
   retransmission on corruption), acknowledges consumed buffers (which reclaims the producer-side
   buffer), and performs atomic partial-read invalidation -- via `FetchFailedException` -- whenever a
   producer cannot be read or a stream completes before all expected blocks arrive.
-- `StreamingBlockExchange` -- the package-private in-process producer-to-consumer data path used in
-  this release. It connects writer block emission to reader callbacks, delegates block-byte storage,
-  reclamation, and read-back to the `MemorySpillManager`, tracks per-map coverage so a reader only
-  completes once all expected blocks are delivered, and serves block-specific resend requests. A
-  later checkpoint backs this contract with the distributed `TransportContext` transport.
+- `StreamingBlockExchange` -- the package-private producer-to-consumer data path. It connects writer
+  block emission to reader callbacks, delegates block-byte storage, reclamation, and read-back to the
+  `MemorySpillManager`, tracks per-map coverage so a reader only completes once all expected blocks
+  are delivered, and serves block-specific resend requests. The same routing serves both co-located
+  readers (in-process) and remote readers: when a `StreamingShuffleTransport` is bound, a remote
+  subscriber is registered as an ordinary consumer proxy, so block delivery, acks, resends, and
+  completion/failure signals cross executor boundaries with no change to the writer or reader.
+- `StreamingShuffleTransport` -- the cross-executor wire transport. It builds on Spark's existing
+  `TransportContext` (server, client factory, and `RpcHandler`) through their public interfaces
+  only -- no transport internals are modified -- and carries the streaming protocol's BLOCK,
+  COMPLETE, FAILED, ACK, RESEND, and SUBSCRIBE messages between executors' streaming endpoints.
 - `BackpressureProtocol` -- provides consumer-to-producer heartbeat flow-control state, a
   token-bucket rate limiter, slow-consumer/admission fallback signals, and QoS priority arbitration
   (shuffle traffic is prioritized over speculative tasks).
@@ -137,18 +146,20 @@ checkpoint (see the **Availability** note in the [Overview](#overview)).
 
 Streaming shuffle reuses the following existing subsystems **without modification**:
 
-- **Instantiation** *(planned, later checkpoint)* -- the manager is created through the dynamic
-  `ShuffleManager` factory, so `SparkEnv` is untouched; registering the `streaming` name in the
-  factory map is sufficient. This release does not yet add that map entry.
-- **Fallback** *(planned, later checkpoint)* -- `StreamingShuffleManager` composes a
-  `SortShuffleManager` and delegates `registerShuffle`, `getWriter`, and `getReader` to it for the
-  sort path; the sort engine is never modified. The fallback signals are computed in this release;
-  the delegating manager that acts on them lands later.
+- **Instantiation** -- the manager is created through the dynamic `ShuffleManager` factory, so
+  `SparkEnv` is untouched; registering the `streaming` name in the factory map is sufficient.
+- **Fallback** -- `StreamingShuffleManager` composes a `SortShuffleManager` and delegates
+  `registerShuffle`, `getWriter`, and `getReader` to it for the sort path; the sort engine is never
+  modified. At registration time it falls back for disabled/unsupported shuffles, and at run time a
+  manager-owned fallback writer/reader catches a streaming fallback signal, discards partial
+  streaming state, and re-routes the task through the composed sort engine before any output is
+  advertised.
 - **Memory accounting** -- buffer allocation is tracked through the existing `MemoryManager`
   interface; the executor memory model is not redesigned.
-- **Networking** -- no new transport stack is introduced. In this release the data path is the
-  in-process `StreamingBlockExchange`; a later checkpoint streams blocks over the existing
-  `TransportContext` behind the same consumer contract.
+- **Networking** -- no new transport stack is introduced. Blocks stream over a
+  `StreamingShuffleTransport` built on the existing `TransportContext`; co-located producers and
+  consumers (or a transport-less unit test) use the same `StreamingBlockExchange` contract
+  in-process.
 - **Checksums** -- CRC32C generation and validation reuse the existing `ShuffleChecksumUtils`
   facility.
 - **Output discovery** -- the writer emits a standard `MapStatus`, so `MapOutputTracker` and the
@@ -163,49 +174,55 @@ Streaming shuffle is designed so that the proven sort-based shuffle is always av
 **Sort-based shuffle is the default**, and streaming shuffle runs alongside it -- it never replaces
 the default engine.
 
-**Two-fold activation** *(manager selection lands in a later checkpoint).* The intended activation
-requires BOTH:
+**Two-fold activation.** Activation requires BOTH:
 
 - `spark.shuffle.manager=streaming` -- selects `StreamingShuffleManager` through the
   shuffle-manager factory map, and
 - `spark.shuffle.streaming.enabled=true` -- the master opt-in feature flag.
 
-Because `StreamingShuffleManager` and its factory-map registration are staged for a later checkpoint
-(see the **Availability** note in the [Overview](#overview)), `spark.shuffle.manager=streaming` is
-not yet selectable: in this release Spark uses the default sort-based shuffle regardless of these
-settings. The configuration keys above are final and accepted by this release; they will gate
-streaming once the manager lands.
+`spark.shuffle.manager=streaming` is selectable in this release. With the manager selected but the
+feature flag left at its default `false`, the manager registers every shuffle with the composed
+`SortShuffleManager`, so Spark behaves exactly as it does with the default sort-based shuffle until
+you also set `spark.shuffle.streaming.enabled=true`.
 
-**Composition, not replacement** *(planned, later checkpoint).* `StreamingShuffleManager` will
-**compose a `SortShuffleManager` instance and delegate to it** whenever streaming is disabled, the
-shuffle dependency is unsupported, or a runtime fallback condition fires. The sort engine is never
-modified; it is reused exactly as-is. Because the streaming writer already emits a standard
-`MapStatus` and the streaming reader signals failures through the existing `FetchFailedException`,
-the DAG scheduler cannot tell the two engines apart.
+**Composition, not replacement.** `StreamingShuffleManager` **composes a `SortShuffleManager`
+instance and delegates to it** whenever streaming is disabled, the shuffle dependency is unsupported,
+or a runtime fallback condition fires. The sort engine is never modified; it is reused exactly
+as-is. Because the streaming writer already emits a standard `MapStatus` and the streaming reader
+signals failures through the existing `FetchFailedException`, the DAG scheduler cannot tell the two
+engines apart.
 
 ## Fallback conditions
 
-The design reverts a shuffle to sort-based shuffle when any of the following runtime conditions is
-detected. In this release the **detection signals** are computed by the `BackpressureProtocol` and
-the writer (which raises a `StreamingShuffleFallbackException` on oversize records and on admission
-fallback); the **automatic per-shuffle revert** that consumes these signals is performed by the
-`StreamingShuffleManager` and therefore lands with the manager in a later checkpoint.
+The manager reverts a task to sort-based shuffle when a runtime fallback condition is detected. The
+**detection signals** are computed by the `BackpressureProtocol` and the writer (which raises an
+internal `StreamingShuffleFallbackException` on oversize records, on a sustained-slow consumer, and
+on admission/memory-pressure timeout); a manager-owned fallback writer catches that signal, discards
+partial streaming state, and re-writes the task's records through the composed `SortShuffleManager`.
 
-1. The consumer is sustained **2x slower** than the producer for **more than 60 seconds**.
-2. **Memory pressure** that would prevent buffer allocation (OOM risk).
-3. **Network saturation** above **90%** of link capacity.
-4. **Producer/consumer version mismatch**.
+1. The consumer is sustained **2x slower** than the producer for **more than 60 seconds** (slow-
+   consumer signal) -- **implemented** as an automatic runtime fallback.
+2. **Memory pressure or an admission deadline** that would prevent buffer allocation (OOM risk) --
+   **implemented** as an automatic runtime fallback.
+3. A single record whose serialized block exceeds the pipelined block-size cap and so cannot be
+   streamed -- **implemented** as an automatic runtime fallback.
+4. **Network saturation** above **90%** of link capacity and **producer/consumer version mismatch**
+   -- documented design goals that remain **heuristic in v1**; they are not yet wired as automatic
+   triggers.
 
-Once the manager lands, any of these conditions causes the affected stage to transparently use
-sort-based shuffle, preserving correctness and avoiding regression. Fallback is per-shuffle and
-requires no user intervention.
+For the implemented conditions, the affected task transparently produces sort-based output with no
+record loss and without surfacing a task failure, preserving correctness and avoiding regression.
+Fallback is per-task and requires no user intervention. Note that the reader-side fallback is
+duplication-free only before the first record has been yielded to the consumer; once consumption has
+begun, a producer failure or coverage shortfall instead triggers the existing `FetchFailedException`
+upstream-recomputation path.
 
 # Configuration
 
 Streaming shuffle adds five properties under the `spark.shuffle.streaming.*` namespace. The
 **Since Version** for all five is **4.1.0**, and all five are present and validated in this release.
-They will gate streaming once `spark.shuffle.manager=streaming` becomes selectable with the
-later-checkpoint manager and `spark.shuffle.streaming.enabled=true` is set (see
+They gate streaming when `spark.shuffle.manager=streaming` is selected and
+`spark.shuffle.streaming.enabled=true` is set (see
 [Coexistence and Graceful Fallback](#coexistence-and-graceful-fallback)).
 
 | Property Name | Default | Meaning | Since Version |
@@ -262,9 +279,9 @@ parameters:
 
 - Heartbeat interval: **10s**
 - Connection timeout: **5s**
-- TCP keepalive: **5s** -- a transport-level setting that applies once the distributed
-  `TransportContext`-backed transport lands in a later checkpoint; the constant is defined in this
-  release but the in-process data path does not use a TCP socket.
+- TCP keepalive: **5s** -- a transport-level setting that applies to the `TransportContext`-backed
+  `StreamingShuffleTransport` when blocks stream across executors; co-located (in-process) transfers
+  through the `StreamingBlockExchange` do not use a TCP socket.
 - Pipelined block size: limited to **2MB** -- enforced at emission time; a single record that would
   exceed this cap raises a `StreamingShuffleFallbackException` rather than emitting an oversized
   block.
@@ -281,12 +298,12 @@ execution cannot starve in-progress streaming shuffles of bandwidth or buffer me
 
 Streaming-shuffle telemetry uses the **existing Spark metrics system** -- the Dropwizard
 `MetricRegistry` pattern used by other Spark metric sources. The metrics are published by a metrics
-source named **`streamingShuffle`** (the `StreamingShuffleSource` class), which is present in this
-release and updated live by the streaming data-plane components, so it adds no overhead on the
-sort-based fallback path. Registration of the source into the cluster metrics system -- and thus
-exposure over **JMX** and any other configured metrics sink (see the
-[monitoring guide](monitoring.html)) -- is wired together with the `StreamingShuffleManager` in a
-later checkpoint.
+source named **`streamingShuffle`** (the `StreamingShuffleSource` class), which is updated live by
+the streaming data-plane components, so it adds no overhead on the sort-based fallback path. The
+`StreamingShuffleManager` registers the source with the running `MetricsSystem` when one is
+available (the registration is best-effort and guarded, so a missing `SparkEnv` or a duplicate
+registration never affects the data path), exposing the metrics over **JMX** and any other
+configured metrics sink (see the [monitoring guide](monitoring.html)).
 
 The source publishes four metrics:
 
@@ -323,13 +340,13 @@ the [monitoring guide](monitoring.html). Recommended dashboard panels:
 The list below maps common symptoms to corrective actions. The relevant metrics are described in
 [Monitoring and Metrics](#monitoring-and-metrics).
 
-- **Streaming shuffle does not take effect.** In this release this is expected: the
-  `StreamingShuffleManager` and its factory-map registration are staged for a later checkpoint, so
-  `spark.shuffle.manager=streaming` is not yet selectable and Spark uses the default sort-based
-  shuffle (see the **Availability** note in the [Overview](#overview)). Once the manager lands,
-  verify that BOTH `spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true` are
-  set and that executors were restarted after the configuration change (configuration is not applied
-  dynamically).
+- **Streaming shuffle does not take effect.** Verify that BOTH `spark.shuffle.manager=streaming`
+  and `spark.shuffle.streaming.enabled=true` are set: selecting the manager alone leaves every
+  shuffle on the composed sort-based engine. Confirm the shuffle is supported (a shuffle that
+  requires map-side combine is delegated to sort by design), and that executors were restarted
+  after the configuration change (configuration is not applied dynamically). If streaming is active
+  but a stage still runs on sort, a runtime fallback condition may have fired -- check
+  `shuffle.streaming.backpressureEvents` (see the **Fallback conditions** above).
 - **Frequent spilling** (high `shuffle.streaming.spillCount`, with
   `shuffle.streaming.bufferUtilizationPercent` sustained near the threshold). On memory-rich
   executors, increase `spark.shuffle.streaming.bufferSizePercent` or
@@ -350,13 +367,15 @@ The list below maps common symptoms to corrective actions. The relevant metrics 
 Streaming shuffle is opt-in and is designed to be safe to adopt incrementally because sort-based
 shuffle remains the unchanged default and the designated automatic fallback.
 
-> **Note.** Manager selection (`spark.shuffle.manager=streaming`) is not available in this release;
-> it lands with the `StreamingShuffleManager` in a later checkpoint (see the **Availability** note
-> in the [Overview](#overview)). The procedure below is the **target opt-in procedure** for that
-> later checkpoint. In this release the streaming engine cannot be activated as the cluster shuffle
-> manager, so no migration action is required yet.
+> **Note.** `spark.shuffle.manager=streaming` is selectable in this release and the procedure below
+> applies as written. Keep the **current v1 limitations** in mind when planning a rollout (see the
+> **Availability** note in the [Overview](#overview)): the cross-executor transport is reused
+> through the exchange's subscribe/publish API but producer rendezvous is not yet scheduler-driven,
+> the reader-side fallback is duplication-free only before the first record is yielded, and a couple
+> of documented fallback conditions remain heuristic. Because sort-based shuffle is the unchanged
+> default and the automatic fallback, adopting streaming is safe to do incrementally.
 
-**Opt-in procedure (applies once the manager lands).**
+**Opt-in procedure.**
 
 1. Start in a test/staging environment using a representative shuffle-bound job (10GB+ of shuffle
    data, 100+ partitions).
@@ -367,7 +386,7 @@ shuffle remains the unchanged default and the designated automatic fallback.
    `spark.shuffle.streaming.maxBandwidthMBps` as needed.
 4. Roll out gradually to broader workloads once the staging results are satisfactory.
 
-Example `spark-submit` configuration to enable streaming shuffle (once the manager lands):
+Example `spark-submit` configuration to enable streaming shuffle:
 
 ```
 --conf spark.shuffle.manager=streaming \
@@ -384,9 +403,9 @@ data or state migration is required.
 # Compatibility Matrix
 
 Streaming shuffle **introduces no new dependencies**. It reuses the existing Dropwizard metrics
-registry, and the distributed data path (later checkpoint) reuses the existing Netty transport
-(`TransportContext`); no build manifest changes are required. The read-only build baseline for this
-feature is:
+registry, and the cross-executor data path reuses the existing Netty transport (`TransportContext`)
+through its public interfaces; no build manifest changes are required. The read-only build baseline
+for this feature is:
 
 | Component | Version |
 |-----------|---------|
@@ -398,6 +417,5 @@ feature is:
 | Dropwizard Metrics | 4.2.33 |
 
 Because the feature is additive and confined to the `org.apache.spark.shuffle.streaming` package
-plus two small integration touchpoints (the configuration registry in this release, and the
-shuffle-manager factory map in a later checkpoint), it does not change any existing dependency,
-transport, or metrics infrastructure.
+plus two small integration touchpoints (the configuration registry and the shuffle-manager factory
+map entry), it does not change any existing dependency, transport, or metrics infrastructure.

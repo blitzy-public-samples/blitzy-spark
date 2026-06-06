@@ -31,6 +31,7 @@ import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
 import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.serializer.JavaSerializer
+import org.apache.spark.shuffle.IndexShuffleBlockResolver
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.util.Utils
 
@@ -137,6 +138,48 @@ class StreamingShuffleWriterSuite
   // Reads a single named gauge value from a real StreamingShuffleSource's MetricRegistry.
   private def gaugeValue(source: StreamingShuffleSource, name: String): Long =
     source.metricRegistry.getGauges().get(name).getValue().asInstanceOf[Long]
+
+  // Builds the REAL streaming collaborators over the live SparkEnv -- a genuine MemorySpillManager
+  // (backed by the executor MemoryManager and an IndexShuffleBlockResolver), a real in-process
+  // StreamingBlockExchange, a real BackpressureProtocol, and a real StreamingShuffleSource -- runs
+  // `body`, then tears every collaborator down so no spill-poller/heartbeat daemon threads leak.
+  // Unlike newWriter's mock defaults, this exercises genuine byte registration / reclamation /
+  // release through the spill manager so the suite can assert the AAP zero-leak property against
+  // the real `trackedBytesTotal` / `reservedBytesTotal` counters rather than a mock interaction.
+  // The exchange is supplied through `makeExchange` so a test can substitute a meta-recording
+  // subclass while keeping the rest of the live wiring identical.
+  private def withRealStreaming(
+      makeExchange: MemorySpillManager => StreamingBlockExchange =
+        spill => new StreamingBlockExchange(conf, spill))(
+      body: (StreamingShuffleSource, MemorySpillManager, StreamingBlockExchange,
+        BackpressureProtocol) => Unit): Unit = {
+    val source = new StreamingShuffleSource
+    val resolver = new IndexShuffleBlockResolver(conf)
+    val spill = new MemorySpillManager(conf, sc.env.memoryManager, resolver, source)
+    val exchange = makeExchange(spill)
+    val backpressure = new BackpressureProtocol(conf, 1, source)
+    try {
+      body(source, spill, exchange, backpressure)
+    } finally {
+      backpressure.stop()
+      exchange.stop()
+      spill.stop()
+      resolver.stop()
+    }
+  }
+
+  // A thin real-exchange subclass that records the BlockMeta of every block the writer publishes
+  // while running the genuine register/buffer path via `super.publishBlock`. It lets a test drive
+  // the ack-to-reclaim path for each streamed block deterministically without mocking byte
+  // movement.
+  private class RecordingExchange(spill: MemorySpillManager)
+    extends StreamingBlockExchange(conf, spill) {
+    val publishedMetas = new java.util.concurrent.ConcurrentLinkedQueue[BlockMeta]()
+    override def publishBlock(meta: BlockMeta, bytes: Array[Byte]): Boolean = {
+      publishedMetas.add(meta)
+      super.publishBlock(meta, bytes)
+    }
+  }
 
   test("stop(success = true) emits a MapStatus after writing an empty iterator") {
     val writer = newWriter(mapId = 1L)
@@ -253,6 +296,45 @@ class StreamingShuffleWriterSuite
       verify(spillManager, times(1)).unregisterMap(shuffleId, 7L)
     } finally {
       writer.stop(success = false)
+    }
+  }
+
+  test("registers buffered bytes during write and releases all of them on producer failure") {
+    // Real-memory zero-leak coverage (F8): run the writer over a genuine MemorySpillManager and a
+    // real in-process exchange so byte accounting is exercised end-to-end rather than mocked.
+    withRealStreaming() { (source, spill, exchange, backpressure) =>
+      val writer = newWriter(
+        mapId = 8L, backpressure = backpressure, spillManager = spill, exchange = exchange,
+        source = source)
+      // No consumer subscribes, so every published block stays buffered: the writer must have
+      // actually registered bytes with the spill manager.
+      writer.write(Random.shuffle((1 to 64).toList).map(i => (i, i)).iterator)
+      spill.trackedBytesTotal must be > 0L
+      // Producer failure frees every block this map registered. Both real counters -- the logical
+      // buffered-byte tally and the storage memory reserved from the MemoryManager -- return to
+      // zero, which is the AAP's zero-leak property asserted on real state, not a mock interaction.
+      assert(writer.stop(success = false).isEmpty)
+      spill.trackedBytesTotal mustBe 0L
+      spill.reservedBytesTotal mustBe 0L
+    }
+  }
+
+  test("buffered bytes are reclaimed to zero once the consumer acknowledges every block") {
+    // Real-memory reclaim coverage (F8): capture the exact blocks the writer streams, then drive
+    // the ack-to-reclaim path per block and prove both byte counters drain back to zero before a
+    // successful stop advertises the MapStatus -- the full register -> reclaim -> release cycle.
+    withRealStreaming(spill => new RecordingExchange(spill)) { (source, spill, exchange, _) =>
+      val recording = exchange.asInstanceOf[RecordingExchange]
+      val writer = newWriter(mapId = 9L, spillManager = spill, exchange = exchange, source = source)
+      writer.write(Random.shuffle((1 to 16).toList).map(i => (i, i)).iterator)
+      spill.trackedBytesTotal must be > 0L
+      // Acknowledge every streamed block; the in-process exchange reclaims each buffer through the
+      // shared spill manager (the ack-bounded buffer-lifetime contract), so memory drains fully.
+      recording.publishedMetas.forEach(meta => recording.ack(meta))
+      spill.trackedBytesTotal mustBe 0L
+      spill.reservedBytesTotal mustBe 0L
+      // A successful stop after the consumer drained the buffers still advertises a MapStatus.
+      assert(writer.stop(success = true).isDefined)
     }
   }
 }

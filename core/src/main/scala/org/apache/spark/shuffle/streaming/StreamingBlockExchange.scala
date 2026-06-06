@@ -26,24 +26,28 @@ import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.storage.{BlockId, BlockManagerId}
 
 /**
- * In-process producer-to-consumer data path for the opt-in streaming shuffle engine: the component
- * that actually carries finalized block bytes from a [[StreamingShuffleWriter]] to the
+ * Producer-to-consumer data path for the opt-in streaming shuffle engine: the component that
+ * actually carries finalized block bytes from a [[StreamingShuffleWriter]] to the
  * [[StreamingShuffleReader]] callbacks, and carries consumer acknowledgments / retransmission
- * requests back. It is the CP1 realization of the streaming data plane; the bytes it routes are
- * owned and bounded by the shared [[MemorySpillManager]], so this class never holds block bytes
- * itself and adds no memory of its own beyond small per-shuffle bookkeeping.
+ * requests back. The bytes it routes are owned and bounded by the shared [[MemorySpillManager]], so
+ * this class never holds block bytes itself and adds no memory of its own beyond small per-shuffle
+ * bookkeeping.
  *
- * Why an exchange (coexistence strategy): the streaming engine deliberately confines itself to the
- * `ShuffleManager` abstraction boundary and reuses, rather than modifies, the existing transport,
- * scheduler, and memory subsystems. The producer (map) side emits blocks through [[publishBlock]];
- * the consumer (reduce) side subscribes through [[registerReader]] and receives blocks on the
- * [[StreamingBlockConsumer]] callbacks it already exposes. Routing a block to its single owning
- * reducer (by reduce partition) and delivering map-completion / failure signals to every interested
- * reducer is the entire contract. A later checkpoint replaces the in-process hand-off with a
- * handler bound to the EXISTING `org.apache.spark.network.TransportContext`; the
- * [[StreamingBlockConsumer]] contract is identical either way, so the writer and reader need no
- * change when that lands. This keeps the streaming wiring fully inside the streaming package
- * (`private[spark]`), enforcing the zero-cross-contamination rule.
+ * Local and remote routing (coexistence strategy): the streaming engine deliberately confines
+ * itself to the `ShuffleManager` abstraction boundary and reuses, rather than modifies,
+ * the existing transport, scheduler, and memory subsystems. The producer (map) side emits
+ * blocks through [[publishBlock]]; the consumer (reduce) side subscribes through
+ * [[registerReader]] and receives
+ * blocks on the [[StreamingBlockConsumer]] callbacks it already exposes. When the producer and
+ * consumer are co-located the hand-off is in-process. When they are on different executors, the
+ * exchange routes over the EXISTING `org.apache.spark.network.TransportContext` via a bound
+ * [[StreamingShuffleTransport]] (see [[bindTransport]]): a remote consumer is registered as an
+ * ordinary [[StreamingBlockConsumer]] proxy ([[RemoteReaderProxy]]) so the SAME routing logic
+ * delivers to it, except "deliver" serializes the callback and ships it over the network. The
+ * [[StreamingBlockConsumer]] contract is identical whether a consumer is local or remote, so the
+ * writer and reader need no change. If no transport is bound (e.g. a unit test), the exchange is
+ * purely in-process exactly as before. This keeps the streaming wiring fully inside the streaming
+ * package (`private[spark]`), enforcing the zero-cross-contamination rule.
  *
  * Coverage and zero-loss semantics: the exchange forwards each producing map's per-reduce block
  * counts (via [[completeMap]]) so the consumer can verify it has received EVERY expected block from
@@ -76,7 +80,7 @@ import org.apache.spark.storage.{BlockId, BlockManagerId}
 private[spark] class StreamingBlockExchange(
     conf: SparkConf,
     spillManager: MemorySpillManager)
-  extends Logging {
+  extends Logging with StreamingShuffleTransport.StreamingTransportListener {
 
   import StreamingBlockExchange._
 
@@ -89,6 +93,21 @@ private[spark] class StreamingBlockExchange(
 
   // Set once stop() runs; short-circuits further publish/complete/resend after teardown begins.
   @volatile private var stopped = false
+
+  // The cross-executor network plane, bound by the engine via bindTransport AFTER construction (the
+  // transport needs this exchange as its receive listener, so the two are wired in two steps).
+  // Stays null for in-process-only use (every existing unit test), where all routing is local
+  // and remote helpers below are never reached. Read on the hot path, so @volatile for safe
+  // publication.
+  @volatile private var transport: StreamingShuffleTransport = _
+
+  // Source endpoint (producer streaming host, port) for blocks that arrived over the network, keyed
+  // by block key. Consulted by ack/requestResend so a consumer sends its acknowledgment / resend
+  // request back to the EXACT producer executor that owns the bytes (that executor's
+  // MemorySpillManager holds them), rather than reclaiming/resending locally. Entries are
+  // removed on ack.
+  private val remoteSources =
+    new ConcurrentHashMap[MemorySpillManager.BlockKey, (String, Int)]()
 
   // Per-shuffle bookkeeping. `readers` holds the currently-subscribed reducers. `pendingBlocks`
   // holds blocks published before their single owning reducer subscribed (each is delivered exactly
@@ -286,9 +305,21 @@ private[spark] class StreamingBlockExchange(
    * @param meta the consumed block's metadata
    */
   def ack(meta: BlockMeta): Unit = {
-    spillManager.reclaim(meta.key)
-    if (debug) {
-      logDebug(s"Streaming shuffle consumer acknowledged block ${meta.key}; buffer reclaimed")
+    val source = remoteSources.remove(meta.key)
+    if (source != null && transport != null) {
+      // The block was streamed from another executor, whose MemorySpillManager owns the bytes. Send
+      // the ack there so it -- not this consumer -- reclaims the buffer within the mandated 100ms.
+      transport.send(source._1, source._2, StreamingShuffleTransport.encodeAck(meta))
+      if (debug) {
+        logDebug(s"Streaming shuffle consumer acknowledged remote block ${meta.key} to " +
+          s"${source._1}:${source._2}")
+      }
+    } else {
+      // In-process (co-located producer): reclaim directly through the shared spill manager.
+      spillManager.reclaim(meta.key)
+      if (debug) {
+        logDebug(s"Streaming shuffle consumer acknowledged block ${meta.key}; buffer reclaimed")
+      }
     }
   }
 
@@ -305,6 +336,18 @@ private[spark] class StreamingBlockExchange(
   def requestResend(meta: BlockMeta): Boolean = {
     if (stopped) {
       false
+    } else if (remoteSources.containsKey(meta.key) && transport != null) {
+      // The block came from another executor; forward the resend request to that producer, which
+      // re-reads the exact block from its spill manager and re-delivers it over the transport. The
+      // remoteSources entry is left in place (only ack removes it) so the resend can be
+      // acked later.
+      val source = remoteSources.get(meta.key)
+      transport.send(source._1, source._2, StreamingShuffleTransport.encodeResend(meta))
+      if (debug) {
+        logDebug(s"Streaming shuffle requested remote resend of block ${meta.key} from " +
+          s"${source._1}:${source._2}")
+      }
+      true
     } else {
       spillManager.read(meta.key) match {
         case Some(bytes) =>
@@ -328,11 +371,169 @@ private[spark] class StreamingBlockExchange(
 
   /**
    * Tears down the exchange, dropping all per-shuffle routing state. Does NOT stop the shared
-   * [[MemorySpillManager]], whose lifetime is owned by its creator. Idempotent.
+   * [[MemorySpillManager]] or the bound [[StreamingShuffleTransport]], whose lifetimes are owned by
+   * the engine that created them. Idempotent.
    */
   def stop(): Unit = {
     stopped = true
     shuffles.clear()
+    remoteSources.clear()
+  }
+
+  /**
+   * Binds the cross-executor network plane. Called once by the engine AFTER both this exchange and
+   * the transport are constructed (the transport takes this exchange as its receive listener,
+   * so the two are necessarily wired in two steps). Until this is called the exchange routes
+   * purely in-process; afterwards remote consumers/producers are reachable over the network.
+   * Idempotent rebinding is not supported (and never attempted by the engine).
+   *
+   * @param t the streaming transport for this executor (server + client factory over
+   *          TransportContext)
+   */
+  def bindTransport(t: StreamingShuffleTransport): Unit = {
+    transport = t
+  }
+
+  /**
+   * Consumer-side entry point: tell a producer executor that this consumer wants blocks for the
+   * given ranges, by sending a SUBSCRIBE over the transport. The producer registers a
+   * [[RemoteReaderProxy]] pointing back at this executor's transport endpoint and begins streaming
+   * matching blocks here. No-op if no transport is bound.
+   *
+   * Note on rendezvous: discovering WHICH executor hosts a given producer (and thus the
+   * `producerHost`/`producerPort` to pass here) is the scheduler/`MapOutputTracker` concern, which
+   * is out of scope for this feature (AAP section 0.6.2) and is therefore driven by the caller. The
+   * data path itself -- the subject of this component -- fully crosses executor boundaries here.
+   *
+   * @param producerHost the producer executor's streaming-transport host
+   * @param producerPort the producer executor's streaming-transport port
+   * @param shuffleId the shuffle to subscribe to
+   * @param startMapIndex inclusive start of the consumed map-index range
+   * @param endMapIndex exclusive end of the consumed map-index range
+   * @param startPartition inclusive start of the consumed reduce-partition range
+   * @param endPartition exclusive end of the consumed reduce-partition range
+   */
+  def subscribeRemote(
+      producerHost: String,
+      producerPort: Int,
+      shuffleId: Int,
+      startMapIndex: Int,
+      endMapIndex: Int,
+      startPartition: Int,
+      endPartition: Int): Unit = {
+    val t = transport
+    if (t != null) {
+      t.send(producerHost, producerPort, StreamingShuffleTransport.encodeSubscribe(
+        shuffleId, startMapIndex, endMapIndex, startPartition, endPartition, t.host, t.port))
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // StreamingTransportListener: receive-side callbacks invoked by the transport's RpcHandler when a
+  // message arrives from a peer executor. They translate network messages into the SAME local
+  // routing primitives used for in-process shuffle, so the producer/consumer contracts are
+  // identical whether a peer is local or remote.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Producer side: a remote consumer subscribed. Register a [[RemoteReaderProxy]] for its ranges
+   * through the ordinary [[registerReader]] path, so all existing routing (including replay of
+   * already-published blocks and completion/failure logs) delivers to it -- except delivery
+   * serializes the callback and ships it back to the consumer's endpoint.
+   */
+  override def onRemoteSubscribe(
+      shuffleId: Int,
+      startMapIndex: Int,
+      endMapIndex: Int,
+      startPartition: Int,
+      endPartition: Int,
+      consumerHost: String,
+      consumerPort: Int): Unit = {
+    val proxy = new RemoteReaderProxy(shuffleId, consumerHost, consumerPort)
+    registerReader(shuffleId, startMapIndex, endMapIndex, startPartition, endPartition, proxy)
+    if (debug) {
+      logDebug(s"Streaming shuffle registered remote reader $consumerHost:$consumerPort for " +
+        s"shuffle $shuffleId maps [$startMapIndex, $endMapIndex) partitions " +
+        s"[$startPartition, $endPartition)")
+    }
+  }
+
+  /**
+   * Consumer side: a block arrived from a remote producer. In the common case the local reader is
+   * already subscribed (the reader registers locally BEFORE it subscribes remotely), so we remember
+   * the producer endpoint -- so a later ack/resend for this exact block goes back to the owning
+   * executor -- and deliver the bytes straight to the reader. The bytes stay owned by the
+   * producer's spill manager until our ack frees them.
+   *
+   * Rare race (block arrives before the local reader subscribes): take local ownership instead --
+   * store the bytes in THIS executor's spill manager and buffer the meta so [[registerReader]]
+   * replays it, and ack the producer immediately so it frees its copy. The block is now locally
+   * owned (absent from `remoteSources`), so the reader's later ack/resend reclaims/re-reads
+   * locally.
+   */
+  override def onRemoteBlock(
+      meta: BlockMeta,
+      bytes: Array[Byte],
+      producerHost: String,
+      producerPort: Int): Unit = {
+    if (!stopped) {
+      val state = stateFor(meta.shuffleId)
+      val target = state.synchronized {
+        val reader = state.readers.find(_.matchesBlock(meta))
+        if (reader.isEmpty) {
+          // Pre-subscribe race: take local ownership of the bytes and buffer for replay.
+          spillManager.register(meta.key, bytes)
+          state.pendingBlocks += meta
+        }
+        reader
+      }
+      if (target.isDefined) {
+        remoteSources.put(meta.key, (producerHost, producerPort))
+        deliverBlock(target.get.consumer, meta, bytes)
+      } else {
+        // Ownership transferred locally above; release the producer's copy.
+        val t = transport
+        if (t != null) {
+          t.send(producerHost, producerPort, StreamingShuffleTransport.encodeAck(meta))
+        }
+      }
+    }
+  }
+
+  /**
+   * Consumer side: a remote producer completed a map. Route it through the local completion path.
+   */
+  override def onRemoteComplete(
+      shuffleId: Int,
+      mapId: Long,
+      mapIndex: Int,
+      blockCounts: Array[Long]): Unit = {
+    completeMap(shuffleId, mapId, mapIndex, blockCounts)
+  }
+
+  /** Consumer side: a remote producer failed. Route it through the local failure path. */
+  override def onRemoteFailure(
+      shuffleId: Int,
+      mapId: Long,
+      mapIndex: Int,
+      bmAddress: BlockManagerId,
+      message: String): Unit = {
+    producerFailed(shuffleId, mapId, mapIndex, bmAddress, message, null)
+  }
+
+  /** Producer side: a remote consumer acknowledged a block. Reclaim its buffer here (we own it). */
+  override def onRemoteAck(meta: BlockMeta): Unit = {
+    spillManager.reclaim(meta.key)
+    if (debug) {
+      logDebug(s"Streaming shuffle reclaimed block ${meta.key} on remote consumer ack")
+    }
+  }
+
+  /**
+   * Producer side: a remote consumer requested a resend. Re-read and re-deliver (back over net).
+   */
+  override def onRemoteResend(meta: BlockMeta): Unit = {
+    requestResend(meta)
   }
 
    // Hand one block to a consumer. Invoked only OUTSIDE the lock; the consumer's callback
@@ -342,6 +543,51 @@ private[spark] class StreamingBlockExchange(
       meta: BlockMeta,
       bytes: Array[Byte]): Unit = {
     consumer.onBlockReceived(meta, bytes)
+  }
+
+  /**
+   * A [[StreamingBlockConsumer]] that forwards every callback to a remote consumer executor
+   * over the bound [[StreamingShuffleTransport]]. The producer-side exchange registers one of
+   * these per remote SUBSCRIBE, so the ordinary routing in
+   * [[publishBlock]]/[[completeMap]]/[[producerFailed]] delivers to it exactly as to a local
+   * reader -- but "deliver" serializes the message and ships it to `consumerHost:consumerPort`.
+   * The producer's own transport endpoint is stamped into each BLOCK so the consumer can
+   * ack/resend back to the right executor.
+   */
+  private final class RemoteReaderProxy(shuffleId: Int, consumerHost: String, consumerPort: Int)
+    extends StreamingBlockConsumer {
+
+    override def onBlockReceived(meta: BlockMeta, bytes: Array[Byte]): Unit = {
+      val t = transport
+      if (t != null) {
+        t.send(consumerHost, consumerPort,
+          StreamingShuffleTransport.encodeBlock(t.host, t.port, meta, bytes))
+      }
+    }
+
+    // The shuffle id is captured at registration (a proxy is created per remote SUBSCRIBE, which
+    // carries it) because onMapComplete/onProducerFailed do not -- a local consumer already
+    // knows it from its own registration, but the remote wire form must carry it.
+    override def onMapComplete(mapId: Long, mapIndex: Int, blockCounts: Array[Long]): Unit = {
+      val t = transport
+      if (t != null) {
+        t.send(consumerHost, consumerPort,
+          StreamingShuffleTransport.encodeComplete(shuffleId, mapId, mapIndex, blockCounts))
+      }
+    }
+
+    override def onProducerFailed(
+        bmAddress: BlockManagerId,
+        mapId: Long,
+        mapIndex: Int,
+        message: String,
+        cause: Throwable): Unit = {
+      val t = transport
+      if (t != null) {
+        t.send(consumerHost, consumerPort,
+          StreamingShuffleTransport.encodeFailure(shuffleId, mapId, mapIndex, bmAddress, message))
+      }
+    }
   }
 }
 

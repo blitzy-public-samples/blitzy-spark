@@ -346,6 +346,40 @@ private[spark] class MemorySpillManager(
     deleteFilesQuietly(files)
   }
 
+  /**
+   * Unregisters EVERY block belonging to a given shuffle, across all of its map tasks, releasing
+   * each block's buffer memory (and any spill file) back to the [[MemoryManager]] and dropping it
+   * from the registry. This is the shuffle-level cleanup path invoked from
+   * `StreamingShuffleManager.unregisterShuffle`: unlike sort-based shuffle (whose per-map on-disk
+   * data is removed by the composed `SortShuffleManager`'s `IndexShuffleBlockResolver`), streaming
+   * blocks that a consumer has not yet acknowledged live in this manager's buffers/spill files, so
+   * they MUST be reclaimed here or they leak when a shuffle is unregistered before every consumer
+   * acknowledges its blocks. Mirrors [[unregisterMap]] but matches on the shuffle id alone.
+   *
+   * @param shuffleId the shuffle whose buffered/spilled streaming blocks should all be dropped
+   */
+  def unregisterShuffle(shuffleId: Int): Unit = {
+    val files = new ArrayBuffer[File]()
+    registryLock.synchronized {
+      val iterator = registry.entrySet().iterator()
+      while (iterator.hasNext) {
+        val entry = iterator.next()
+        if (entry.getKey.shuffleId == shuffleId) {
+          val file = releaseEntryLocked(entry.getValue)
+          if (file != null) {
+            files += file
+          }
+          iterator.remove()
+        }
+      }
+    }
+    // Disk deletions performed OUTSIDE the lock so a slow filesystem never stalls the registry.
+    deleteFilesQuietly(files)
+    if (debug) {
+      logDebug(s"Streaming shuffle freed all buffered blocks for shuffle $shuffleId on unregister")
+    }
+  }
+
   // Remove a block from the registry and release everything it holds. The spill file (if any) is
   // deleted OUTSIDE the lock so a slow filesystem cannot block the consumer-ack reclamation path.
   private def freeAndRemove(key: BlockKey, reason: String): Unit = {

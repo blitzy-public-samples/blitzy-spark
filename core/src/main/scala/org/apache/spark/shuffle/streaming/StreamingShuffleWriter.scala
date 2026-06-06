@@ -509,10 +509,12 @@ private[spark] object StreamingShuffleWriter {
  * that exceeds the 2MB pipelined block cap, or when the backpressure protocol reports a terminal
  * fallback condition (a sustained-slow consumer or an admission deadline that is not an interrupt).
  *
- * Coexistence: at this checkpoint the exception propagates and the task fails, so the unmodified
- * scheduler recomputes the stage; a later checkpoint's `StreamingShuffleManager` catches it and
- * re-runs the map through the composed `SortShuffleManager`, realizing graceful degradation without
- * touching the scheduler or the sort path.
+ * Coexistence: [[FallbackShuffleWriter]] (which `StreamingShuffleManager.getWriter` wraps around
+ * every streaming writer) CATCHES this exception during `write` and transparently re-runs the map
+ * through the composed `SortShuffleManager`, replaying the buffered record sequence so the map
+ * produces ordinary sort-based output and a real `MapStatus`. Graceful degradation is therefore
+ * realized WITHOUT failing the task and without touching the scheduler or the sort path -- the
+ * exception is an internal control signal that never escapes the fallback writer.
  */
 private[spark] class StreamingShuffleFallbackException(message: String)
   extends SparkException(message)

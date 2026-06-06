@@ -50,15 +50,17 @@ import org.apache.spark.util.collection.ExternalSorter
  *     `StreamingShuffleRecordIterator`), so unchanged call sites observe exactly the same contract
  *     as the sort-based reader: `read(): Iterator[Product2[K, C]]`.
  *  2. In-progress block requests via the [[StreamingBlockExchange]]: this reader subscribes to the
- *     exchange (the in-process producer->consumer data path) and mirrors the proven
+ *     exchange (the producer->consumer data path) and mirrors the proven
  *     `ShuffleBlockFetcherIterator` design, where a delivery callback enqueues results and the
  *     consuming iterator polls them. The exchange delivers each block, per-map completion-coverage
- *     signal, and producer failure through the [[StreamingBlockConsumer]] callbacks below. The
- *     in-process exchange is the checkpoint realization of the data path; a later checkpoint backs
- *     it with the EXISTING `org.apache.spark.network.TransportContext` (reuse only; no transport
- *     class is modified). Consumer-to-producer heartbeats (via the shared [[BackpressureProtocol]])
- *     apply flow control. The inbox is BOUNDED by message count and block bytes, so a fast producer
- *     blocks in the delivery callback (backpressure) rather than accumulating unbounded arrays.
+ *     signal, and producer failure through the [[StreamingBlockConsumer]] callbacks below. When the
+ *     producer is co-located the hand-off is in-process; when it is on another executor
+ *     the exchange routes over the EXISTING `org.apache.spark.network.TransportContext`
+ *     (reuse only; no transport class is modified) -- identical callbacks either way.
+ *     Consumer-to-producer heartbeats (via the shared [[BackpressureProtocol]]) apply
+ *     flow control. The inbox is BOUNDED by message count and block bytes, so a fast
+ *     producer blocks in the delivery callback (backpressure) rather than accumulating
+ *     unbounded arrays.
  *  3. CRC32C integrity with block-specific retransmission: every received block is validated with
  *     the EXISTING [[ShuffleChecksumHelper]] (CRC32C). A corrupt block is re-requested by
  *     its addressable key via [[StreamingBlockExchange.requestResend]] with exponential backoff
@@ -101,16 +103,36 @@ import org.apache.spark.util.collection.ExternalSorter
  * @param backpressure the shared consumer-to-producer flow-control/heartbeat protocol
  * @param metricsSource the shared JMX metrics source whose `partialReadInvalidations` counter is
  *                      incremented on every atomic partial-read invalidation
- * @param exchange the in-process producer->consumer data path this reader subscribes to; it routes
- *                 writer-emitted blocks to [[onBlockReceived]], map-completion coverage to
- *                 [[onMapComplete]], and producer failures to [[onProducerFailed]], and carries
- *                 acknowledgments ([[StreamingBlockExchange.ack]]) and block-specific
- *                 retransmission requests ([[StreamingBlockExchange.requestResend]]) back
+ * @param exchange the producer->consumer data path this reader subscribes to
+ *                 (in-process when the producer is co-located, over the existing
+ *                 TransportContext when remote); it routes writer-emitted blocks to
+ *                 [[onBlockReceived]], map-completion coverage to [[onMapComplete]], and
+ *                 producer failures to [[onProducerFailed]], and carries acknowledgments
+ *                 ([[StreamingBlockExchange.ack]]) and block-specific retransmission
+ *                 requests ([[StreamingBlockExchange.requestResend]]) back
  * @param inboxCapacity the maximum number of undelivered messages buffered in the inbox before
  *                      producer callbacks block (count bound; see also `maxInboxBytes`)
  * @param maxInboxBytes the maximum number of undelivered block bytes buffered in the inbox before
  *                      producer callbacks block (byte bound; a single block larger than this is
  *                      still admitted alone so the reader never deadlocks)
+ * @param fallbackOnSilence when true, a producer timeout or producer failure that occurs BEFORE any
+ *                          record has been yielded raises a [[StreamingReadFallbackException]]
+ *                          instead of a [[FetchFailedException]], letting the manager-owned
+ *                          [[FallbackShuffleReader]] degrade this read to the composed
+ *                          `SortShuffleManager` cleanly (no duplicate output). Once a record has
+ *                          been yielded a clean swap is impossible, so invalidation reverts to the
+ *                          standard [[FetchFailedException]] path regardless of this flag. Defaults
+ *                          to false so direct (non-wrapped) construction keeps the original
+ *                          invalidate-only semantics.
+ * @param producerTimeoutMillis the millis deadline for the next in-progress block, map
+ *                              completion, or producer failure before a producer timeout is
+ *                              declared. A constructor seam (default
+ *                              [[StreamingShuffleReader.DefaultProducerTimeoutMillis]]) letting
+ *                              tests drive deterministic timeouts with no real waits
+ * @param retryBackoffStartMillis the initial millis backoff before the first block-specific
+ *                                retransmission, doubling thereafter (capped). A constructor seam
+ *                                (default `DefaultRetryBackoffStartMillis`) letting tests exercise
+ *                                the retry budget with instant (zero) backoff
  * @tparam K the type of the keys being read
  * @tparam C the type of the combined values produced on the reduce side
  */
@@ -127,7 +149,10 @@ private[spark] class StreamingShuffleReader[K, C](
     metricsSource: StreamingShuffleSource,
     exchange: StreamingBlockExchange,
     inboxCapacity: Int = StreamingShuffleReader.DefaultInboxCapacity,
-    maxInboxBytes: Int = StreamingShuffleReader.DefaultMaxInboxBytes)
+    maxInboxBytes: Int = StreamingShuffleReader.DefaultMaxInboxBytes,
+    fallbackOnSilence: Boolean = false,
+    producerTimeoutMillis: Long = StreamingShuffleReader.DefaultProducerTimeoutMillis,
+    retryBackoffStartMillis: Long = StreamingShuffleReader.DefaultRetryBackoffStartMillis)
   extends ShuffleReader[K, C] with StreamingBlockConsumer with Logging {
 
   import StreamingShuffleReader._
@@ -148,10 +173,11 @@ private[spark] class StreamingShuffleReader[K, C](
   private val checksumAlgorithm: String = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
 
   // Consumer-side receive buffer for in-progress blocks streamed from producers. The
-  // StreamingBlockExchange (the in-process producer->consumer data path; reused at a later
-  // checkpoint behind the EXISTING TransportContext) delivers blocks/coverage/failures through the
-  // StreamingBlockConsumer callbacks below; the returned iterator drains them on the task thread.
-  // This mirrors the listener-enqueues / iterator-polls structure of ShuffleBlockFetcherIterator.
+  // StreamingBlockExchange (the producer->consumer data path; in-process for co-located producers,
+  // over the EXISTING TransportContext for remote ones) delivers blocks/coverage/failures through
+  // the StreamingBlockConsumer callbacks below; the returned iterator drains them on the
+  // task thread. This mirrors the listener-enqueues / iterator-polls structure of
+  // ShuffleBlockFetcherIterator.
   //
   // BOUNDED for memory safety + backpressure (R4): the inbox is bounded by BOTH message count
   // (`inboxCapacity`) and buffered block bytes (`maxInboxBytes`). A producer callback that would
@@ -180,6 +206,14 @@ private[spark] class StreamingShuffleReader[K, C](
   // truncated read) requires a completion signal from EVERY one of these maps, plus every block
   // each of them reports having emitted for this reader's partition range (R1).
   private val expectedMapCount: Int = math.max(0, endMapIndex - startMapIndex)
+
+  // Runtime fallback gate (F1). Set true the instant the returned iterator hands a record to the
+  // caller. A clean swap to the sort reader is only possible while this is false (nothing has been
+  // observed downstream yet); once a record escapes, invalidateOrFallback can no longer fall back
+  // without risking duplicate output, so it reverts to the standard FetchFailedException path.
+  // Touched solely by the single task thread that drains the iterator, so it needs no
+  // synchronization.
+  private var anyRecordYielded: Boolean = false
 
   if (debug) {
     logDebug(s"StreamingShuffleReader created for shuffle $shuffleId partitions " +
@@ -380,7 +414,13 @@ private[spark] class StreamingShuffleReader[K, C](
       if (!hasNext) {
         throw new NoSuchElementException("StreamingShuffleReader has no more records")
       }
-      currentRecords.next()
+      val record = currentRecords.next()
+      // Runtime fallback gate (F1): a record is now leaving this iterator. From here on a clean
+      // swap to the sort reader is no longer possible (this record may already have been observed
+      // or fed into a downstream sorter/aggregator), so any later invalidation must use the
+      // standard FetchFailedException recompute path rather than StreamingReadFallbackException.
+      anyRecordYielded = true
+      record
     }
 
     // Pull messages until a validated block yields records or FULL coverage is verified. A poll
@@ -390,12 +430,14 @@ private[spark] class StreamingShuffleReader[K, C](
         pollNext() match {
           case null =>
             // Inbox timed out. If full coverage was already verified we are done; otherwise a
-            // producer stalled and this is a truncated read, which we NEVER report as success --
-            // invalidate atomically so the existing FetchFailedException path recomputes upstream.
+            // producer stalled and this is a truncated read, which we NEVER report as success.
+            // Route through invalidateOrFallback (F1): if nothing has been yielded yet and this
+            // reader opted into silence fallback, degrade cleanly to sort; otherwise invalidate
+            // atomically so the existing FetchFailedException path recomputes upstream.
             if (isComplete) {
               finished = true
             } else {
-              invalidate(lastProducerAddress, lastMapId, lastMapIndex, startPartition,
+              invalidateOrFallback(lastProducerAddress, lastMapId, lastMapIndex, startPartition,
                 s"Streaming shuffle producer timed out before full coverage (shuffle $shuffleId, " +
                   s"reduce $startPartition): ${completedMaps.size}/$expectedMapCount " +
                   "expected maps", null)
@@ -406,8 +448,11 @@ private[spark] class StreamingShuffleReader[K, C](
               finished = true
             }
           case pf: ProducerFailed =>
-            // Producer crash / network partition: invalidate atomically (throws; never returns).
-            invalidate(pf.bmAddress, pf.mapId, pf.mapIndex, startPartition, pf.message, pf.cause)
+            // Producer crash / network partition. Route through invalidateOrFallback (F1): degrade
+            // cleanly to sort when nothing has been yielded and fallback was requested, otherwise
+            // invalidate atomically (throws; never returns).
+            invalidateOrFallback(
+              pf.bmAddress, pf.mapId, pf.mapIndex, startPartition, pf.message, pf.cause)
           case chunk: BlockChunk =>
             currentRecords = receiveChunk(chunk)
             // Finish as soon as coverage completes, even with records pending: `finished` only
@@ -463,7 +508,7 @@ private[spark] class StreamingShuffleReader[K, C](
         // protocol; this is how the reader paces and "pulls" streamed blocks.
         backpressure.consumerHeartbeat()
         val startNanos = System.nanoTime()
-        val msg = inbox.poll(ProducerTimeoutMillis, TimeUnit.MILLISECONDS)
+        val msg = inbox.poll(producerTimeoutMillis, TimeUnit.MILLISECONDS)
         readMetrics.incFetchWaitTime(elapsedMillis(startNanos))
         msg match {
           case bc: BlockChunk =>
@@ -557,7 +602,7 @@ private[spark] class StreamingShuffleReader[K, C](
   // bounded by a hard cap so a pathological retransmission can never wait unbounded.
   private def backoffMillis(attempt: Int): Long = {
     val shift = math.min(math.max(attempt - 1, 0), MaxBackoffShift)
-    math.min(RetryBackoffStartMillis * (1L << shift), MaxBackoffMillis)
+    math.min(retryBackoffStartMillis * (1L << shift), MaxBackoffMillis)
   }
 
   // Sleep that honors task interruption: restores the interrupt status and returns promptly so the
@@ -651,6 +696,31 @@ private[spark] class StreamingShuffleReader[K, C](
     throw new FetchFailedException(bmAddress, shuffleId, mapId, mapIndex, reduceId, message, cause)
   }
 
+  // Runtime fallback dispatch (F1) for producer silence/failure. When the reader was built with
+  // fallbackOnSilence=true AND no record has yet escaped the iterator, a clean degrade to the
+  // composed SortShuffleManager is still possible, so raise StreamingReadFallbackException for the
+  // manager-owned FallbackShuffleReader to handle -- this does NOT touch the
+  // partialReadInvalidations counter or the scheduler. Otherwise (a record was already yielded, or
+  // fallback was not requested) defer to invalidate(), which throws FetchFailedException to drive
+  // the existing upstream recompute path. Returns Nothing so callers may use it in expression
+  // position.
+  private def invalidateOrFallback(
+      bmAddress: BlockManagerId,
+      mapId: Long,
+      mapIndex: Int,
+      reduceId: Int,
+      message: String,
+      cause: Throwable): Nothing = {
+    if (fallbackOnSilence && !anyRecordYielded) {
+      if (debug) {
+        logDebug(s"Streaming shuffle silence before first record for shuffle $shuffleId reduce " +
+          s"$reduceId; signalling clean fallback to sort: $message")
+      }
+      throw new StreamingReadFallbackException(message)
+    }
+    invalidate(bmAddress, mapId, mapIndex, reduceId, message, cause)
+  }
+
   // Elapsed wall-clock millis since the given start nanos, for fetch-wait-time accounting.
   private def elapsedMillis(startNanos: Long): Long =
     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
@@ -663,8 +733,11 @@ private[spark] class StreamingShuffleReader[K, C](
  */
 private[spark] object StreamingShuffleReader {
 
-  /** Initial retransmission backoff in millis (start 1s, per the streaming design). */
-  private val RetryBackoffStartMillis: Long =
+  /**
+   * Default initial retransmission backoff in millis (start 1s, per the streaming design). Used as
+   * the default for the `retryBackoffStartMillis` constructor seam; tests pass 0 for instant retry.
+   */
+  private[streaming] val DefaultRetryBackoffStartMillis: Long =
     BackpressureProtocol.RETRY_BACKOFF_START_SECONDS * 1000L
 
   /** Maximum retransmission attempts before a block is declared unrecoverable (5). */
@@ -677,10 +750,12 @@ private[spark] object StreamingShuffleReader {
   private val MaxBackoffMillis: Long = 30000L
 
   /**
-   * Deadline for receiving the next in-progress block, completion, or failure before declaring a
-   * producer timeout, in millis (heartbeat interval + connect timeout).
+   * Default deadline for receiving the next in-progress block, completion, or failure before
+   * declaring a producer timeout, in millis (heartbeat interval + connect timeout). Used as the
+   * default for the `producerTimeoutMillis` constructor seam; tests pass a tiny value to force a
+   * deterministic timeout.
    */
-  private val ProducerTimeoutMillis: Long =
+  private[streaming] val DefaultProducerTimeoutMillis: Long =
     (BackpressureProtocol.HEARTBEAT_INTERVAL_SECONDS +
       BackpressureProtocol.CONNECT_TIMEOUT_SECONDS) * 1000L
 

@@ -150,6 +150,10 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       endPartition: Int,
       inboxCapacity: Int = 128,
       maxInboxBytes: Int = 64 * 1024 * 1024,
+      // Test seams (F6/F7): instant retry backoff by default so the bounded-retry loop runs with no
+      // real sleeps, and the production producer-timeout deadline unless a test shortens it.
+      producerTimeoutMillis: Long = StreamingShuffleReader.DefaultProducerTimeoutMillis,
+      retryBackoffStartMillis: Long = 0L,
       shuffleId: Int = 0): (StreamingShuffleReader[Int, Int], TempShuffleReadMetrics) = {
     val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
     when(dependency.serializer).thenReturn(serializer)
@@ -161,7 +165,9 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     val reader = new StreamingShuffleReader[Int, Int](
       handle, startMapIndex, endMapIndex, startPartition, endPartition,
       context, readMetrics, conf, backpressure, source, exchange,
-      inboxCapacity, maxInboxBytes)
+      inboxCapacity, maxInboxBytes,
+      producerTimeoutMillis = producerTimeoutMillis,
+      retryBackoffStartMillis = retryBackoffStartMillis)
     (reader, readMetrics)
   }
 
@@ -205,9 +211,9 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       exchange.completeMap(0, 0L, 0, Array(1L))
 
       // The reader recomputes the CRC32C, detects the mismatch, requests a block-specific resend
-      // (one ~1s backoff) which the exchange satisfies from the retained block, and the read then
-      // succeeds with the correct record. A single resend is well within the <=5-attempt budget,
-      // so no partial-read invalidation occurs.
+      // (instant backoff via the retryBackoffStartMillis test seam -- no real sleep) which the
+      // exchange satisfies from the retained block, and the read then succeeds with the correct
+      // record. A single resend is well within the <=5-attempt budget, so no invalidation occurs.
       val pairs = reader.read().toList.map(r => (r._1, r._2))
       pairs mustBe Seq((5, 55))
       invalidations(source) mustBe 0L
@@ -215,6 +221,33 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       eventually(timeout(Span(2000, Millis)), interval(Span(20, Millis))) {
         spill.trackedBytesTotal mustBe 0L
       }
+    }
+  }
+
+  test("a permanently-corrupt block invalidates after the bounded retry budget is exhausted") {
+    withStreaming { (source, spill, exchange, backpressure) =>
+      // Instant backoff (newReader passes retryBackoffStartMillis = 0) keeps the bounded-retry loop
+      // deterministic with no real sleeps. The block stays corrupt on EVERY resend: the bytes the
+      // exchange re-reads from the retained spill entry are themselves corrupt, so each
+      // retransmission fails CRC32C again, exercising the full <=5-attempt failure bound.
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1)
+      val good = serialize(ShuffleBlockId(0, 0L, 0), Seq((9, 99)))
+      val meta = metaFor(0, 0L, 0, 0L, 0, good)
+      val corrupt = good.clone()
+      val mid = corrupt.length / 2
+      corrupt(mid) = (corrupt(mid) ^ 0xFF).toByte
+      // Retain the CORRUPT bytes so every key-addressed resend re-delivers corruption.
+      spill.register(meta.key, corrupt)
+      reader.onBlockReceived(meta, corrupt)
+      exchange.completeMap(0, 0L, 0, Array(1L))
+
+      // After MAX_RETRY_ATTEMPTS (5) failed validations the read is invalidated atomically: it
+      // throws FetchFailedException (never a truncated success) and bumps partialReadInvalidations
+      // exactly once.
+      intercept[FetchFailedException] {
+        reader.read().toList
+      }
+      invalidations(source) mustBe 1L
     }
   }
 
@@ -255,6 +288,24 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     }
   }
 
+  test("a silent producer that never completes times out and is atomically invalidated") {
+    withStreaming { (source, _, exchange, backpressure) =>
+      // A tiny producer-timeout seam makes the deadline deterministic: the producer sends no block
+      // and never signals completion, so the reader's inbox poll times out quickly. The value only
+      // bounds how long the poll waits; correctness does not depend on it (nothing is ever sent).
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1,
+        producerTimeoutMillis = 100L)
+
+      // With no block and no completion, coverage can never be satisfied, so the timeout is a
+      // truncated read -- surfaced as an atomic FetchFailedException (never a truncated success),
+      // incrementing partialReadInvalidations exactly once, with no record yielded.
+      intercept[FetchFailedException] {
+        reader.read().toList
+      }
+      invalidations(source) mustBe 1L
+    }
+  }
+
   test("a fully-covered stream across multiple maps returns every record") {
     withStreaming { (source, _, exchange, backpressure) =>
       // Two producing maps each stream one block for partition 0; the reader needs a completion
@@ -291,11 +342,15 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       producer.setDaemon(true)
       producer.start()
 
-      // Exactly one delivery completes; the second stays blocked until the consumer drains.
-      eventually(timeout(Span(2000, Millis)), interval(Span(20, Millis))) {
-        delivered.get() mustBe 1
+      // Deterministically wait until the producer is provably parked inside the second publish's
+      // delivery callback (blocked acquiring the exhausted byte budget) rather than sleeping a
+      // fixed wall-clock interval. Once parked, exactly one delivery has completed and the second
+      // cannot advance until the consumer drains the first block -- proving backpressure.
+      eventually(timeout(Span(2000, Millis)), interval(Span(10, Millis))) {
+        val state = producer.getState
+        assert(state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING,
+          s"expected the producer to be blocked in publishBlock, but it was $state")
       }
-      Thread.sleep(300)
       delivered.get() mustBe 1
 
       // Draining the reader releases the byte budget, unblocking the producer; full coverage (two

@@ -1451,15 +1451,20 @@ Apart from these, the following properties are also available, and may be useful
   <td>
     Whether to enable the opt-in streaming shuffle engine, which streams intermediate shuffle data
     directly from map (producer) tasks to reduce (consumer) tasks through bounded in-memory buffers
-    governed by a backpressure protocol, instead of materializing it to disk. This flag is intended
-    to take effect only when <code>spark.shuffle.manager</code> is also set to <code>streaming</code>;
-    otherwise it is ignored, and sort-based shuffle remains the default and the automatic fallback
-    engine. <b>Availability:</b> selecting <code>spark.shuffle.manager=streaming</code> requires the
-    <code>StreamingShuffleManager</code> and its shuffle-manager factory registration, which are
-    staged for a later checkpoint; until then this property is accepted but inactive, and Spark uses
-    the default sort-based shuffle. Changing this value requires an executor restart (no dynamic
-    reconfiguration in this version). See <a href="streaming-shuffle.html">Streaming Shuffle</a> for
-    the full breakdown of what is implemented now versus planned.
+    governed by a backpressure protocol, instead of materializing it to disk. This flag takes effect
+    only when <code>spark.shuffle.manager</code> is also set to <code>streaming</code>; otherwise it
+    is ignored, and sort-based shuffle remains the default and the automatic fallback engine.
+    <b>Availability:</b> <code>spark.shuffle.manager=streaming</code> now selects
+    <code>StreamingShuffleManager</code> (its shuffle-manager factory registration has landed), but
+    streaming is engaged for a given shuffle only when this flag is also <code>true</code> and the
+    shuffle is supported. When the manager is selected with this flag left <code>false</code> (or for
+    a shuffle that streaming cannot serve, such as one requiring map-side combine), the manager
+    transparently delegates to the composed sort-based engine, and at run time any fallback condition
+    (for example a sustained-slow consumer, an admission/memory-pressure signal, or an over-sized
+    unsplittable block) automatically degrades that task to sort-based shuffle without failing it.
+    Changing this value requires an executor restart (no dynamic reconfiguration in this version).
+    See <a href="streaming-shuffle.html">Streaming Shuffle</a> for the full architecture, current
+    behavior, and remaining limitations.
   </td>
   <td>4.1.0</td>
 </tr>

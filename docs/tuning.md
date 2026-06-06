@@ -293,21 +293,21 @@ latency-sensitive workloads — typically those moving 10GB or more of shuffle d
 partitions — it targets a 30-50% reduction in end-to-end shuffle latency. CPU-bound workloads are
 expected to see a smaller benefit (around 5-10%).
 
-**Availability.** This release ships the streaming-shuffle data-plane components and their
-configuration properties, but the cluster-wide activation surface — selecting streaming as the
-shuffle manager via `spark.shuffle.manager=streaming` and the manager-driven automatic fallback to
-sort-based shuffle — is staged for a later checkpoint. Until that manager lands,
-`spark.shuffle.manager=streaming` is not selectable and Spark continues to use the default sort-based
-shuffle, so the tuning advice below applies once streaming can be activated. See the
-[Streaming Shuffle](streaming-shuffle.html) guide's availability note for the precise breakdown of
-what is implemented now versus planned.
+**Availability.** `spark.shuffle.manager=streaming` is now selectable: this release ships the
+`StreamingShuffleManager`, its shuffle-manager factory registration, the streaming data-plane
+components, and the manager-driven automatic fallback to sort-based shuffle. Activation is
+**two-fold and opt-in** — streaming is engaged for a shuffle only when both
+`spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true` are set; selecting the
+manager with the flag left at its default `false` simply delegates every shuffle to the composed
+sort-based engine, so the tuning advice below applies once you set the flag. See the
+[Streaming Shuffle](streaming-shuffle.html) guide for the full architecture, current behavior, and
+remaining limitations.
 
-When streaming is activated (in that later checkpoint) it is **disabled by default** and is turned on
-only by setting both `spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true`. It
-is designed to **coexist with, and never replace, the default sort-based shuffle**: the streaming
-manager composes a sort-based shuffle manager and automatically falls back to it for memory-bound
-workloads or whenever a fallback condition fires, so jobs that do not benefit from streaming incur no
-regression.
+Streaming shuffle is **disabled by default** and is turned on only by setting both
+`spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true`. It is designed to
+**coexist with, and never replace, the default sort-based shuffle**: the streaming manager composes a
+sort-based shuffle manager and automatically falls back to it for memory-bound workloads or whenever
+a runtime fallback condition fires, so jobs that do not benefit from streaming incur no regression.
 
 When tuning streaming shuffle, consider the following properties (all require an executor restart to
 take effect, as there is no dynamic reconfiguration in this version):
@@ -323,14 +323,18 @@ take effect, as there is no dynamic reconfiguration in this version):
   streaming bandwidth via a token-bucket rate limiter. Set a finite value to protect a shared or
   saturated network.
 
-If a consumer falls well behind its producer, memory pressure threatens buffer allocation, the
-network saturates, or producer and consumer versions differ, streaming shuffle is designed to
-automatically revert to sort-based shuffle for the affected stage. The detection signals for these
-conditions are computed in this release; the manager-driven revert that consumes them arrives with
-the streaming manager in a later checkpoint. For the full architecture, fallback model,
-troubleshooting, and feature-flag migration guidance — including which parts are implemented now —
-see the [Streaming Shuffle](streaming-shuffle.html) guide; for the complete list of properties, see
-the [Shuffle Behavior](configuration.html#shuffle-behavior) section of the configuration guide.
+If a consumer falls well behind its producer, memory pressure or an admission deadline threatens
+buffer allocation, or a single record is too large to pipeline, the streaming manager automatically
+reverts the affected task to sort-based shuffle without failing it: partial streaming state is
+discarded and the records are re-written through the composed sort engine, which then advertises the
+map output as usual. This manager-driven runtime fallback is implemented in this release. A few
+documented conditions remain heuristic in this version (for example, link-saturation and
+producer/consumer version-mismatch triggers), and the reader-side fallback is duplication-free only
+before any record has been yielded to the consumer; the [Streaming Shuffle](streaming-shuffle.html)
+guide enumerates these limitations precisely. For the full architecture, fallback model,
+troubleshooting, and feature-flag migration guidance see that guide; for the complete list of
+properties, see the [Shuffle Behavior](configuration.html#shuffle-behavior) section of the
+configuration guide.
 
 ## Broadcasting Large Variables
 
