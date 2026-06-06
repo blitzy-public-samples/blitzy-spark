@@ -216,17 +216,21 @@ private[spark] class MemorySpillManager(
    * be spilled to disk under memory pressure and read back to serve/retransmit it; callers must not
    * mutate it after registering. Each [[BlockKey]] is registered at most once.
    *
-   * If the storage-memory grant is declined, or registering pushes utilization across the spill
-   * threshold, an out-of-band spill pass is scheduled so the response stays well under 100ms rather
-   * than waiting for the next poll tick. Note that the block is tracked and retained even when the
-   * grant is declined; a `false` return is purely a backpressure signal to the writer, never a
-   * "not stored" signal.
+   * Memory-pressure handling (group B / AAP fallback condition (b)): if the storage-memory grant is
+   * declined, a SYNCHRONOUS spill pass runs (pushing the largest resident blocks to disk to free
+   * their grants) and the acquisition is retried exactly once. If it STILL fails, the block is NOT
+   * stored and `false` is returned -- a HARD admission failure that signals the caller to fall back
+   * to sort-based shuffle rather than buffer under memory pressure and risk OOM. When the grant
+   * succeeds but admitting the block crosses the spill threshold, the block IS stored and an
+   * out-of-band spill is scheduled (response well under 100ms) while `true` is returned, because
+   * that is ordinary backpressure, not an allocation failure.
    *
    * @param key the unique block key `(shuffleId, mapId, partitionId, seq)`
    * @param bytes the buffered bytes to track (ownership transfers to the manager); empty/null is a
    *              no-op
-   * @return true if storage memory was granted, false if the writer should back off (a
-   *         spill has been scheduled), the manager has stopped, or the key was already registered
+   * @return true if the block was stored (storage memory granted); false if it was NOT stored --
+   *         a hard memory-admission failure (after a spill + retry), the manager has stopped, or
+   *         the key was already registered -- and the caller must fall back to sort-based shuffle
    */
   def register(key: BlockKey, bytes: Array[Byte]): Boolean = {
     if (bytes == null || bytes.length == 0) {
@@ -238,7 +242,16 @@ private[spark] class MemorySpillManager(
       val numBytes = bytes.length.toLong
       // Acquire storage memory OUTSIDE the registry lock (no disk I/O, but keep the lock section
       // minimal); the result is reconciled under the lock to close the register/stop race.
-      val granted = acquireStorage(numBytes)
+      var granted = acquireStorage(numBytes)
+      if (!granted) {
+        // Memory pressure (group B): storage memory was declined. Run a SYNCHRONOUS spill pass to
+        // push the largest resident blocks to disk -- freeing their storage-memory grants -- and
+        // retry the acquisition exactly once. maybeSpill takes registryLock internally and is
+        // called here OUTSIDE the lock, so this is safe (no re-entrancy/deadlock). A retry that
+        // still fails is a HARD admission failure that drives the writer to sort-based fallback.
+        maybeSpill()
+        granted = acquireStorage(numBytes)
+      }
       var rejected = false
       registryLock.synchronized {
         if (stopped.get()) {
@@ -249,22 +262,33 @@ private[spark] class MemorySpillManager(
           // Defensive: block keys are unique (monotonic seq per partition). A duplicate must not
           // overwrite the existing entry (which would orphan its bytes/spill file), so reject it.
           rejected = true
+        } else if (!granted) {
+          // Hard admission failure (group B / AAP fallback condition (b)): storage memory could not
+          // be granted even after a spill pass. Do NOT store or track the block. Returning false
+          // makes the streaming writer fall back to sort-based shuffle BEFORE any output is
+          // advertised, rather than buffering under memory pressure and risking executor OOM.
+          rejected = true
         } else {
-          val entry = new BufferedBlock(key, bytes, numBytes, if (granted) numBytes else 0L)
+          val entry = new BufferedBlock(key, bytes, numBytes, numBytes)
           registry.put(key, entry)
           trackedBytes.addAndGet(numBytes)
         }
       }
       if (rejected) {
+        // A grant obtained above is released here on a stop()/duplicate rejection; on a hard
+        // admission failure `granted` is false, so there is nothing to release.
         if (granted) {
           releaseStorage(numBytes)
         }
         false
       } else {
-        if (!granted || currentUtilizationPercent() >= spillThreshold) {
+        // Stored and granted. If admitting this block crossed the spill threshold, schedule an
+        // out-of-band spill so utilization falls back under the threshold while the block stays
+        // readable; this is ordinary backpressure, NOT an admission failure, so the return is true.
+        if (currentUtilizationPercent() >= spillThreshold) {
           triggerImmediateSpill()
         }
-        granted
+        true
       }
     }
   }

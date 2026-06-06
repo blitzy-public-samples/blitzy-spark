@@ -23,8 +23,10 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.shuffle._
 import org.apache.spark.shuffle.sort.SortShuffleManager
+import org.apache.spark.util.RpcUtils
 
 /**
  * Entry point of the OPT-IN streaming shuffle engine. It streams intermediate shuffle data directly
@@ -127,6 +129,27 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
   // stop(). Declared @volatile so the streamingEngine() fast path can read it without the monitor.
   @volatile private[this] var stopped: Boolean = false
 
+  // ---------------------------------------------------------------------------------------------
+  // Cross-executor rendezvous (CRITICAL closure of the AAP's producer->consumer streaming
+  // objective). The data plane (StreamingBlockExchange/StreamingShuffleTransport) can move blocks
+  // across executors, but a reduce task must first DISCOVER which executors host its producers. The
+  // unmodified MapOutputTracker records only post-completion block locations, so this manager hosts
+  // a small additive directory -- the StreamingShuffleEndpointCoordinator -- entirely WITHIN the
+  // ShuffleManager boundary (no scheduler/MapOutputTracker/task changes).
+  //
+  // All three are built best-effort and LAZILY, guarded by `this`, exactly like `engine`: SparkEnv
+  // (and thus rpcEnv) is null while this manager is constructed during SparkEnv bring-up. When no
+  // SparkEnv/RpcEnv is available (e.g. a bare unit test) they stay None and streaming runs
+  // local-only, preserving graceful degradation. `rendezvousInitialized` makes the (idempotent)
+  // setup run at most once per manager.
+  @volatile private[this] var rendezvousInitialized: Boolean = false
+  // DRIVER: ref to the coordinator endpoint this manager set up. EXECUTOR: ref to the driver's
+  // coordinator. None when no RpcEnv is available.
+  @volatile private[this] var coordinatorRef: Option[RpcEndpointRef] = None
+  // Executor-side client wrapping `coordinatorRef`: advertises this executor's transport endpoint
+  // and answers reduce-side peer discovery. None whenever `coordinatorRef` is None.
+  @volatile private[this] var rendezvous: Option[StreamingShuffleRendezvous] = None
+
   if (debug) {
     logInfo(s"StreamingShuffleManager initialized (isDriver=$isDriver, " +
       s"streamingEnabled=$streamingEnabled); sort-based shuffle remains the default and fallback")
@@ -161,6 +184,101 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
       }
     }
   }
+
+  /**
+   * Best-effort, idempotent setup of the cross-executor rendezvous, mirroring
+   * `SparkEnv.registerOrLookupEndpoint`: the DRIVER sets up the single coordinator endpoint and the
+   * EXECUTOR looks up a ref to it. Deferred to first use (not the constructor) because `SparkEnv`
+   * is not yet available while this manager is built during SparkEnv bring-up. Guarded by `this`
+   * and a one-shot flag so the (driver) endpoint is registered exactly once.
+   *
+   * @return the executor-side [[StreamingShuffleRendezvous]] client, or None when no `SparkEnv`/
+   *         `RpcEnv` is available (e.g. a bare unit test) -- streaming then runs local-only
+   */
+  private def ensureRendezvous(): Option[StreamingShuffleRendezvous] = {
+    if (!rendezvousInitialized) {
+      synchronized {
+        if (!rendezvousInitialized) {
+          Option(SparkEnv.get).foreach { env =>
+            try {
+              val ref =
+                if (isDriver) {
+                  // Driver hosts the directory. setupEndpoint registers it under the well-known
+                  // name; this runs on first registerShuffle (driver), before any task launches.
+                  env.rpcEnv.setupEndpoint(
+                    StreamingShuffleEndpointCoordinator.ENDPOINT_NAME,
+                    new StreamingShuffleEndpointCoordinator(env.rpcEnv))
+                } else {
+                  // Executor looks up the driver's directory by name (reuses the existing RpcEnv).
+                  RpcUtils.makeDriverRef(
+                    StreamingShuffleEndpointCoordinator.ENDPOINT_NAME, conf, env.rpcEnv)
+                }
+              coordinatorRef = Some(ref)
+              rendezvous = Some(new StreamingShuffleRendezvous(ref, conf, env.executorId))
+            } catch {
+              case NonFatal(e) =>
+                logWarning("Failed to set up the streaming shuffle rendezvous coordinator; " +
+                  "cross-executor streaming is disabled and streaming runs local-only", e)
+                coordinatorRef = None
+                rendezvous = None
+            }
+          }
+          rendezvousInitialized = true
+        }
+      }
+    }
+    rendezvous
+  }
+
+  /**
+   * Best-effort teardown of the cross-executor rendezvous, called from [[stop]]. The EXECUTOR
+   * withdraws its advertised endpoint from the driver directory so a later discovering reduce task
+   * never targets a dead transport; the DRIVER additionally stops the coordinator endpoint it owns.
+   * Fully guarded so a teardown failure can never prevent the composed [[SortShuffleManager]] from
+   * shutting down (the central coexistence guarantee of [[stop]]). Idempotent and safe when the
+   * rendezvous was never initialized (both fields stay None -> no-ops).
+   */
+  private def tearDownRendezvous(): Unit = {
+    // Withdraw this executor's endpoint first (fire-and-forget), then stop the owned endpoint. The
+    // helper is already best-effort internally; the extra guard here defends the stop() finally.
+    try {
+      rendezvous.foreach(_.unregister())
+    } catch {
+      case NonFatal(e) =>
+        logWarning("Failed to withdraw the streaming shuffle endpoint on stop (best-effort)", e)
+    }
+    // Only the DRIVER owns the coordinator endpoint (it called setupEndpoint); executors merely
+    // hold a ref to it, so they must NOT stop it. Stopping the endpoint clears the directory.
+    if (isDriver) {
+      try {
+        coordinatorRef.foreach(ref => Option(SparkEnv.get).foreach(_.rpcEnv.stop(ref)))
+      } catch {
+        case NonFatal(e) =>
+          logWarning("Failed to stop the streaming shuffle coordinator endpoint (best-effort)", e)
+      }
+    }
+  }
+
+  /**
+   * Best-effort probe for AAP fallback condition (d): producer/consumer protocol-version mismatch.
+   * Delegates to the cross-executor rendezvous, which compares every advertised endpoint's
+   * streaming protocol version against this executor's. Wired into the [[BackpressureProtocol]]
+   * heartbeat (via [[BackpressureProtocol.setFallbackProbe]]) so a mismatch flips `shouldFallback`
+   * and the streaming writer degrades affected shuffles to sort. Returns false when no rendezvous
+   * is available (local mode / bare test) or on any failure, so it never disrupts a healthy run.
+   *
+   * @return true if a peer advertises a different streaming protocol version, false otherwise
+   */
+  private def versionMismatchDetected(): Boolean = {
+    try {
+      ensureRendezvous().exists(_.detectVersionMismatch())
+    } catch {
+      case NonFatal(e) =>
+        logDebug("Streaming shuffle version-mismatch probe failed (best-effort); no fallback", e)
+        false
+    }
+  }
+
 
   /**
    * Gating helper mirroring `SortShuffleManager.canUseSerializedShuffle`: decides whether a shuffle
@@ -198,6 +316,11 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
       // unregisterShuffle cleanup see it, then return the marker handle that getWriter/getReader
       // dispatch on. This is the ONLY place a StreamingShuffleHandle is created.
       streamingShuffles.put(shuffleId, java.lang.Boolean.TRUE)
+      // Cross-executor rendezvous: registerShuffle runs on the DRIVER before any task launches, so
+      // this is the right moment to stand up the coordinator endpoint. It guarantees the directory
+      // exists before executors look it up at first streaming write/read. Best-effort and
+      // idempotent (no-op on executors and after the first call); never blocks or fails register.
+      ensureRendezvous()
       if (debug) {
         logDebug(s"Registering shuffle $shuffleId on the streaming path " +
           s"(${dependency.partitioner.numPartitions} partitions)")
@@ -233,6 +356,18 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
         // task time, when it is guaranteed initialized.
         streamingShuffles.put(handle.shuffleId, java.lang.Boolean.TRUE)
         val e = streamingEngine
+        // QoS (AAP): register this shuffle's priority so the backpressure admission path
+        // (BackpressureProtocol.tryAcquire) arbitrates bandwidth in favor of higher-priority
+        // shuffles under token scarcity. isSpeculative is false because TaskContext exposes NO
+        // public speculative flag; the comparator fully supports the dimension (proven by tests)
+        // and enforces it for any caller that supplies it. Idempotent (last-wins) across this
+        // shuffle's many map tasks on this executor; unregisterShuffle drops it.
+        e.backpressure.registerShufflePriority(
+          handle.shuffleId,
+          BackpressureProtocol.ShufflePriority(
+            isSpeculative = false,
+            streamingHandle.dependency.partitioner.numPartitions,
+            dataVolumeBytes = 0L))
         val streamingWriter = new StreamingShuffleWriter[K, V](
           streamingHandle, mapId, context, metrics, conf,
           e.backpressure, e.spillManager, e.exchange, e.metricsSource)
@@ -279,10 +414,28 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
         // cleanly. The inbox-bound ctor args default, so only the required args plus the flag pass.
         streamingShuffles.put(handle.shuffleId, java.lang.Boolean.TRUE)
         val e = streamingEngine
+        // Cross-executor rendezvous (R-A): resolve the getReader endMapIndex sentinel exactly as
+        // the reader does internally (Int.MaxValue -> the handle's authoritative numMaps) so the
+        // remote SUBSCRIBE advertises the SAME map range to producers that the reader's local
+        // registration uses, keeping the producer-side RemoteReaderProxy map filter identical to
+        // the local reader's coverage.
+        val resolvedEndMapIndex =
+          if (endMapIndex == Int.MaxValue) streamingHandle.numMaps else endMapIndex
         val streamingReader = new StreamingShuffleReader[K, C](
           streamingHandle, startMapIndex, endMapIndex, startPartition, endPartition,
           context, metrics, conf, e.backpressure, e.metricsSource, e.exchange,
-          fallbackOnSilence = true)
+          fallbackOnSilence = true,
+          // The reader fires this ONCE on first read(): discover the remote producer executors from
+          // the driver coordinator and subscribe this reduce task's exchange to each, so blocks on
+          // OTHER executors stream here automatically over the EXISTING transport -- this is the
+          // production caller the cross-executor path previously lacked. It is best-effort:
+          // ensureRendezvous() returns None when no RpcEnv/coordinator is available (e.g. local
+          // mode or a bare unit test) and subscribeToRemoteProducers swallows discovery failures,
+          // so the reader is left on its local in-process subscription only, preserving graceful
+          // degradation (and degrading further to sort if expected remote blocks never arrive).
+          remoteSubscribe = () => ensureRendezvous().foreach(_.subscribeToRemoteProducers(
+            e.exchange, streamingHandle.shuffleId, startMapIndex, resolvedEndMapIndex,
+            startPartition, endPartition)))
         // Runtime fallback (F1): wrap the streaming reader so a StreamingReadFallbackException
         // raised before any record is produced transparently rebuilds a SortShuffleManager reader
         // for the SAME map/partition range and serves from it. The buildSortReader thunk is invoked
@@ -332,6 +485,9 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
     val e = engine
     if (e != null) {
       e.spillManager.unregisterShuffle(shuffleId)
+      // QoS cleanup: drop this shuffle's priority descriptor so the backpressure admission path no
+      // longer arbitrates for it (and the registry does not retain stale entries across shuffles).
+      e.backpressure.unregisterShufflePriority(shuffleId)
     }
     // Coexistence: ALWAYS delegate to the composed SortShuffleManager afterwards. It owns the
     // single IndexShuffleBlockResolver and removes any sort-owned per-map on-disk data for this
@@ -364,6 +520,11 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
         toStop.stop()
       }
     } finally {
+      // Cross-executor rendezvous teardown (best-effort, self-guarded): withdraw this executor's
+      // advertised endpoint and, on the driver, stop the coordinator endpoint. Done in the finally
+      // before the sort stop so it runs even if streaming-engine teardown threw, and it can never
+      // itself prevent the composed SortShuffleManager from shutting down.
+      tearDownRendezvous()
       sortShuffleManager.stop()
     }
   }
@@ -434,13 +595,29 @@ private[spark] class StreamingShuffleManager(conf: SparkConf, isDriver: Boolean)
           None
       }
 
+    // Cross-executor rendezvous (producer/consumer advertisement): once this executor's streaming
+    // transport is listening, advertise its (host, port) to the driver coordinator so REMOTE reduce
+    // tasks can discover and subscribe to it. Best-effort via ensureRendezvous(); a missing
+    // coordinator (or no bound transport) simply leaves this executor reachable for co-located
+    // (in-process) tasks only, preserving graceful degradation.
+    transport.foreach { t =>
+      ensureRendezvous().foreach(_.register(t.host, t.port))
+    }
+
     // Flow control + token-bucket rate limiter shared by the streaming writers/readers. The
     // by-name `numConcurrentShuffles` argument is the live count of active streaming shuffles, so
     // each shuffle's bandwidth share (maxBandwidthMBps / numConcurrentShuffles) tracks the current
-    // degree of concurrency. It also exposes the sustained-slow-consumer `shouldFallback` signal
-    // the writer consults to degrade gracefully to sort-based shuffle.
+    // degree of concurrency. It also exposes the `shouldFallback` signal the writer consults to
+    // degrade gracefully to sort-based shuffle on any of the four AAP fallback conditions.
     val backpressure: BackpressureProtocol =
       new BackpressureProtocol(conf, streamingShuffles.size(), metricsSource)
+
+    // Wire the cross-executor version handshake into the backpressure heartbeat (AAP fallback
+    // condition (d)): on each tick, while not already in fallback, the protocol consults this probe
+    // and -- if a peer advertises a different streaming protocol version -- raises `shouldFallback`
+    // so the writer degrades affected shuffles to sort. Best-effort: returns false in local mode or
+    // when no coordinator is reachable, so a healthy homogeneous cluster never falls back on this.
+    backpressure.setFallbackProbe(() => versionMismatchDetected())
 
     /**
      * Stops the streaming lifecycles in reverse dependency order. Each collaborator's `stop()` is

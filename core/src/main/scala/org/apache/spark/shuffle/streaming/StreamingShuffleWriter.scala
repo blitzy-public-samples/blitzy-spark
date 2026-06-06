@@ -18,16 +18,14 @@
 package org.apache.spark.shuffle.streaming
 
 import java.io.{ByteArrayOutputStream, IOException}
-import java.util.zip.Checksum
 
 import scala.util.control.NonFatal
 
 import org.apache.spark._
 import org.apache.spark.internal.{config, Logging}
-import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.serializer.SerializationStream
-import org.apache.spark.shuffle.{ShuffleWriteMetricsReporter, ShuffleWriter}
+import org.apache.spark.shuffle.{ShuffleChecksumUtils, ShuffleWriteMetricsReporter, ShuffleWriter}
 import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
 
 /**
@@ -56,11 +54,11 @@ import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
  *  3. Flow control: block emission is paced through the shared [[BackpressureProtocol]]
  *     token-bucket rate limiter, and producer throughput is fed back to its heartbeat loop so a
  *     sustained consumer slowdown can trigger graceful fallback to sort-based shuffle.
- *  4. CRC32C integrity: each block carries a checksum computed with the EXISTING
- *     [[ShuffleChecksumHelper]] using the configured `spark.shuffle.checksum.algorithm` (CRC32C
- *     when so configured), the same facility sort-based shuffle uses, so the
- *     [[StreamingShuffleReader]] can validate every block and request retransmission on
- *     corruption. No new checksum implementation is introduced.
+ *  4. CRC32C integrity: each block carries a checksum computed through the EXISTING
+ *     [[org.apache.spark.shuffle.ShuffleChecksumUtils]] facility using the configured
+ *     `spark.shuffle.checksum.algorithm` (CRC32C when so configured), the same facility sort-based
+ *     shuffle uses, so the [[StreamingShuffleReader]] can validate every block and request
+ *     retransmission on corruption. No new checksum implementation is introduced.
  *
  * Output discovery: on a successful write the map task emits a standard [[MapStatus]] built through
  * the `object MapStatus` factory, so the UNMODIFIED `MapOutputTracker` and DAG scheduler locate
@@ -153,7 +151,7 @@ private[spark] class StreamingShuffleWriter[K, V](
 
   // Checksum algorithm for per-block integrity (CRC32C when so configured). Reuses the EXISTING
   // shuffle checksum config rather than introducing a new one; passed verbatim to
-  // ShuffleChecksumHelper.
+  // ShuffleChecksumUtils.computeChecksum.
   private val checksumAlgorithm: String = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
 
   // Verbose debug-logging gate (spark.shuffle.streaming.debug). Held off the hot path so
@@ -224,8 +222,12 @@ private[spark] class StreamingShuffleWriter[K, V](
       val buffer = bufferFor(partitionId)
       writePair(buffer.serStream, record._1, record._2)
       buffer.recordsInBlock += 1L
-      // Bound each pipelined block to <=2MB: flush once the buffered (compressed) size reaches
-      // the threshold so consumers receive in-progress data with minimal latency.
+      // Bound each pipelined block to <=2MB. Flush the serialization/compression stream FIRST so
+      // out.size() reflects the TRUE buffered size: a buffering codec (lz4/snappy/zstd) can
+      // otherwise hide bytes and let a MULTI-RECORD block grow past the cap undetected (group E).
+      // Emit as soon as the true size reaches the threshold (low latency for consumers); emitBlock
+      // enforces a hard 2MB cap and routes any block that still exceeds it to sort.
+      buffer.serStream.flush()
       if (buffer.out.size() >= blockFlushThresholdBytes) {
         flushBlock(buffer)
         buffers(partitionId) = null
@@ -340,21 +342,23 @@ private[spark] class StreamingShuffleWriter[K, V](
   // cleanly with no partial state and no advertised-but-missing output.
   private def emitBlock(partitionId: Int, bytes: Array[Byte], records: Long): Unit = {
     val numBytes = bytes.length.toLong
-    // Hard 2MB cap (MAJOR): a single record whose serialized block exceeds the pipelined cap cannot
-    // be split into <=2MB blocks. Rather than emit an oversized streaming block, signal fallback to
-    // sort-based shuffle (the manager composes SortShuffleManager for exactly this case).
-    if (records <= 1L && numBytes > BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES) {
+    // Hard 2MB cap (MAJOR, group E): NO pipelined block may exceed the cap, whether it holds one
+    // record or many. write() flushes the codec before gating so the threshold check sees the true
+    // size, but a record appended at the boundary -- or a single oversized record -- can still land
+    // a block above 2MB. Such a block cannot be safely split into <=2MB units here, so signal
+    // fallback to sort-based shuffle (the manager composes SortShuffleManager for exactly this
+    // case) rather than stream an oversized block.
+    if (numBytes > BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES) {
+      val cap = BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES
       throw new StreamingShuffleFallbackException(
-        s"Streaming shuffle record for shuffle $shuffleId partition $partitionId serialized to " +
-          s"$numBytes bytes, over the ${BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES}-byte " +
-          "pipelined block cap and cannot be split; falling back to sort-based shuffle")
+        s"Streaming shuffle block for shuffle $shuffleId partition $partitionId serialized to " +
+          s"$numBytes bytes across $records record(s), over the $cap-byte pipelined block cap; " +
+          "it cannot be split, so falling back to sort-based shuffle")
     }
-    // Coexistence (integrity): compute the block checksum with the EXISTING ShuffleChecksumHelper
-    // (CRC32C when so configured) over the EXACT bytes the reader validates -- the same facility
-    // sort-based shuffle uses; no new checksum implementation is introduced.
-    val checksum: Checksum = ShuffleChecksumHelper.getChecksumByAlgorithm(checksumAlgorithm)
-    checksum.update(bytes, 0, bytes.length)
-    val checksumValue = checksum.getValue
+    // Coexistence (integrity): compute the block checksum through the EXISTING ShuffleChecksumUtils
+    // facility (CRC32C when so configured) over the EXACT bytes the reader validates -- the same
+    // facility sort-based shuffle uses; no new checksum implementation is introduced.
+    val checksumValue = ShuffleChecksumUtils.computeChecksum(checksumAlgorithm, bytes)
     // Flow control BEFORE emit: a sustained consumer slowdown (the >60s, 2x-slower signal) means
     // streaming can no longer keep up, so fall back to sort rather than emit into a stalled path.
     if (backpressure.shouldFallback) {
@@ -367,7 +371,7 @@ private[spark] class StreamingShuffleWriter[K, V](
     // interruption (abort the write) from a terminal backpressure/pause (fall back to sort). In
     // either case we publish nothing and update no metrics, so an unadmitted block is never
     // advertised as written (MAJOR interruption fix).
-    if (!backpressure.acquireBlocking(numBytes)) {
+    if (!backpressure.acquireBlocking(shuffleId, numBytes)) {
       if (Thread.currentThread().isInterrupted) {
         throw new IOException(
           s"Streaming shuffle producer interrupted while pacing a $numBytes-byte block for " +
@@ -378,23 +382,30 @@ private[spark] class StreamingShuffleWriter[K, V](
             "within the backpressure deadline; falling back to sort-based shuffle")
       }
     }
-    // Admitted: assign the block's sequence number and publish it over the in-process path. The
-    // exchange registers the bytes with the spill manager (memory accounting + spill via the
-    // EXISTING MemoryManager) and routes them to the owning reducer; a false return is a memory
-    // backpressure hint (the block is still stored and routed), recorded as a backpressure event.
+    // Admitted by the rate limiter: assign the block's sequence number and publish it. The exchange
+    // registers the bytes with the spill manager (memory accounting + spill via the EXISTING
+    // MemoryManager) and routes them to the owning reducer. publishBlock returns false ONLY on a
+    // hard memory-admission failure (the bytes could not be stored even after a spill pass) -- the
+    // OOM-risk fallback condition handled immediately below.
     val seq = blockSeq(partitionId)
     blockSeq(partitionId) = seq + 1L
     val key = MemorySpillManager.BlockKey(shuffleId, mapId, partitionId, seq)
     val meta = StreamingBlockExchange.BlockMeta(
       key, bmAddress, ShuffleBlockId(shuffleId, mapId, partitionId), mapIndex, checksumValue,
       numBytes)
-    val granted = exchange.publishBlock(meta, bytes)
-    if (!granted) {
+    val published = exchange.publishBlock(meta, bytes)
+    if (!published) {
+      // Hard memory-admission failure (group B / AAP fallback condition (b)): the spill manager
+      // could not admit the bytes even after a spill pass, so the exchange neither stored nor
+      // routed the block. Fall back to sort BEFORE any output is advertised -- this throw precedes
+      // all accounting below and the MapStatus emitted by write(). FallbackShuffleWriter catches it
+      // and re-runs the map through the composed SortShuffleManager, replaying the consumed record
+      // prefix, so there is zero data loss and no advertised-but-missing output.
       metricsSource.incBackpressureEvents()
-      if (debug) {
-        logDebug(s"Streaming shuffle buffer budget exhausted for shuffle $shuffleId partition " +
-          s"$partitionId; spill scheduled, throttling producer")
-      }
+      throw new StreamingShuffleFallbackException(
+        s"Streaming shuffle could not admit a $numBytes-byte block for shuffle $shuffleId " +
+          s"partition $partitionId under memory pressure (storage memory exhausted after a spill " +
+          "pass); falling back to sort-based shuffle")
     }
     // Feed producer throughput so the heartbeat loop can compare it against consumer throughput and
     // trigger graceful fallback to sort-based shuffle on a sustained consumer slowdown.
@@ -405,6 +416,10 @@ private[spark] class StreamingShuffleWriter[K, V](
     partitionLengths(partitionId) += numBytes
     totalBytesWritten += numBytes
     totalRecordsWritten += records
+    // QoS: refresh this shuffle's buffered data volume so the backpressure priority tie-breaker
+    // (comparePriority's volume dimension) reflects current progress. A no-op if the shuffle was
+    // never registered, so it is always safe on the hot path.
+    backpressure.updateShuffleDataVolume(shuffleId, totalBytesWritten)
     writeMetrics.incBytesWritten(numBytes)
     writeMetrics.incRecordsWritten(records)
   }

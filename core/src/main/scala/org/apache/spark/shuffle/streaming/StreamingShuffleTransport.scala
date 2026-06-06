@@ -98,8 +98,18 @@ private[spark] class StreamingShuffleTransport(
   // Build the transport configuration through the EXISTING helper, under a dedicated module name so
   // streaming thread/timeout settings (spark.shuffle-streaming.io.*) are independent of other
   // modules while still defaulting from the shared spark.network.* settings.
-  private val transportConf =
-    SparkTransportConf.fromSparkConf(conf, "shuffle-streaming", numUsableCores)
+  private val transportConf = {
+    // Enable TCP keepalive on streaming sockets so a half-open connection to a dead peer is
+    // detected and reaped rather than lingering. The documented 5s probe cadence
+    // ([[BackpressureProtocol.TCP_KEEPALIVE_SECONDS]]) is an OS-level setting -- Spark's transport
+    // only toggles the SO_KEEPALIVE socket option (TransportServer sets it on accepted channels and
+    // TransportClientFactory always sets it on outbound connections); the kernel governs the actual
+    // probe interval. We set the module-scoped key on a CLONED SparkConf so the shared conf is
+    // never mutated (avoiding cross-contamination of other transport modules).
+    val keepAliveConf = conf.clone
+    keepAliveConf.set("spark.shuffle-streaming.io.enableTcpKeepAlive", "true")
+    SparkTransportConf.fromSparkConf(keepAliveConf, "shuffle-streaming", numUsableCores)
+  }
 
   // The EXISTING TransportContext, bound to our streaming RpcHandler. This is the single reused
   // entry point to Spark's Netty stack; it manufactures both the server and the client factory.
@@ -120,7 +130,9 @@ private[spark] class StreamingShuffleTransport(
   @volatile private var stopped = false
 
   if (debug) {
-    logDebug(s"StreamingShuffleTransport listening on $bindHost:${server.getPort}")
+    logDebug(s"StreamingShuffleTransport listening on $bindHost:${server.getPort} " +
+      s"(TCP keepalive enabled; target probe cadence " +
+      s"${BackpressureProtocol.TCP_KEEPALIVE_SECONDS}s is OS-controlled)")
   }
 
   /** The host this transport's server is bound to (this executor's streaming endpoint host). */
@@ -131,6 +143,16 @@ private[spark] class StreamingShuffleTransport(
    * port).
    */
   def port: Int = server.getPort
+
+  /**
+   * Test/diagnostic accessor reporting whether TCP keepalive is enabled on this transport's
+   * underlying (cloned) [[org.apache.spark.network.util.TransportConf]]. The constructor wires
+   * keepalive on by setting `spark.shuffle-streaming.io.enableTcpKeepAlive` on a cloned conf (see
+   * `transportConf` above), which makes `TransportServer` set `SO_KEEPALIVE` on accepted channels.
+   * Scoped `private[streaming]` so it never widens the public API surface beyond the streaming
+   * package, honoring the zero-cross-contamination rule.
+   */
+  private[streaming] def tcpKeepAliveEnabled: Boolean = transportConf.enableTcpKeepAlive()
 
   /**
    * Sends one already-encoded streaming message to a peer executor's streaming server, fire and
@@ -193,6 +215,20 @@ private[spark] object StreamingShuffleTransport {
   private val MSG_FAILED: Byte = 4
   private val MSG_ACK: Byte = 5
   private val MSG_RESEND: Byte = 6
+
+  // Defensive upper bounds for network-supplied array lengths (CWE-20 unvalidated input /
+  // CWE-400 uncontrolled resource consumption). A malformed or malicious peer could otherwise send
+  // a negative or enormous length on a wire field and trigger a NegativeArraySizeException or a
+  // huge heap allocation directly on a Netty IO thread (OOM). Both fields below are validated
+  // against these caps BEFORE any array is allocated in `decodeAndDispatch`.
+  //
+  // A legitimate MSG_BLOCK payload is capped at the 2MB pipelined-block size by the producer
+  // (see [[BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES]]).
+  private val MAX_BLOCK_PAYLOAD_BYTES: Int = BackpressureProtocol.MAX_PIPELINED_BLOCK_BYTES.toInt
+  // A legitimate MSG_COMPLETE carries one Long block-count per reduce partition in the consumer's
+  // range; this ceiling sits far above any realistic partition count (Spark shuffles are tuned to
+  // thousands of partitions) while bounding the array to at most 8MB.
+  private val MAX_PARTITION_COUNT: Int = 1 << 20
 
   /**
    * Receive-side callback contract the [[StreamingBlockExchange]] implements. The
@@ -353,6 +389,13 @@ private[spark] object StreamingShuffleTransport {
         val producerPort = in.readInt()
         val meta = readMeta(in)
         val len = in.readInt()
+        // Security: validate the network-supplied payload length BEFORE allocating so a malformed
+        // peer cannot drive a NegativeArraySizeException or an OOM allocation on this IO thread.
+        // The throw is caught by StreamingShuffleRpcHandler.dispatch (NonFatal -> log + drop the
+        // single message), leaving the channel intact.
+        require(len >= 0 && len <= MAX_BLOCK_PAYLOAD_BYTES,
+          s"Streaming shuffle MSG_BLOCK payload length $len is out of bounds " +
+            s"[0, $MAX_BLOCK_PAYLOAD_BYTES]")
         val payload = new Array[Byte](len)
         in.readFully(payload)
         listener.onRemoteBlock(meta, payload, producerHost, producerPort)
@@ -361,6 +404,11 @@ private[spark] object StreamingShuffleTransport {
         val mapId = in.readLong()
         val mapIndex = in.readInt()
         val n = in.readInt()
+        // Security: bound the network-supplied partition-count array length before allocating, for
+        // the same CWE-20/CWE-400 reasons as MSG_BLOCK above.
+        require(n >= 0 && n <= MAX_PARTITION_COUNT,
+          s"Streaming shuffle MSG_COMPLETE partition count $n is out of bounds " +
+            s"[0, $MAX_PARTITION_COUNT]")
         val counts = new Array[Long](n)
         var i = 0
         while (i < n) {

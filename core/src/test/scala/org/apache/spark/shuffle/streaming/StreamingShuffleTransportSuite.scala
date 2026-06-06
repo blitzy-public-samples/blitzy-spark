@@ -17,6 +17,7 @@
 
 package org.apache.spark.shuffle.streaming
 
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 
 import org.scalatest.concurrent.Eventually
@@ -279,6 +280,123 @@ class StreamingShuffleTransportSuite
       failedMapId mustBe 0L
       failedMapIndex mustBe 0
       message mustBe "simulated producer crash"
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Security: network-supplied array lengths are validated BEFORE allocation (CWE-20 unvalidated
+  // input / CWE-400 uncontrolled resource consumption). Each test builds a well-formed frame with
+  // the production encoder and then overwrites only the length field with a hostile value, exactly
+  // as a malformed or malicious peer would. The decoder must reject the frame before any array is
+  // allocated, and the RPC handler must drop such a frame without failing the channel.
+  // -------------------------------------------------------------------------------------------
+
+  /** A transport listener that records dispatched blocks/completions so a test can assert none. */
+  private class RecordingListener extends StreamingShuffleTransport.StreamingTransportListener {
+    val blocks = new ConcurrentLinkedQueue[BlockMeta]()
+    val completions = new ConcurrentLinkedQueue[(Long, Int)]()
+    override def onRemoteSubscribe(shuffleId: Int, startMapIndex: Int, endMapIndex: Int,
+        startPartition: Int, endPartition: Int, consumerHost: String, consumerPort: Int): Unit = ()
+    override def onRemoteBlock(meta: BlockMeta, bytes: Array[Byte], producerHost: String,
+        producerPort: Int): Unit = blocks.add(meta)
+    override def onRemoteComplete(
+        shuffleId: Int, mapId: Long, mapIndex: Int, blockCounts: Array[Long]): Unit =
+      completions.add((mapId, mapIndex))
+    override def onRemoteFailure(shuffleId: Int, mapId: Long, mapIndex: Int,
+        bmAddress: BlockManagerId, message: String): Unit = ()
+    override def onRemoteAck(meta: BlockMeta): Unit = ()
+    override def onRemoteResend(meta: BlockMeta): Unit = ()
+  }
+
+  /**
+   * Encodes a well-formed MSG_BLOCK for a 16-byte payload, then overwrites the 4-byte
+   * payload-length field (the int directly preceding the trailing payload) with `hostileLen`.
+   */
+  private def blockFrameWithLen(hostileLen: Int): ByteBuffer = {
+    val payload = Array.tabulate[Byte](16)(i => i.toByte)
+    val meta = metaFor(
+      0, mapId = 0L, mapIndex = 0, partitionId = 0, seq = 0L, size = payload.length)
+    val buf = StreamingShuffleTransport.encodeBlock(LoopbackHost, 7337, meta, payload)
+    // The len field is the int immediately before the payload bytes at the end of the frame.
+    buf.putInt(buf.limit() - payload.length - 4, hostileLen)
+    buf
+  }
+
+  /**
+   * Encodes a well-formed MSG_COMPLETE for two partitions, then overwrites the 4-byte partition
+   * -count field with `hostileCount`. Layout: tag(1) + shuffleId(4) + mapId(8) + mapIndex(4), so
+   * the count int sits at byte offset 17.
+   */
+  private def completeFrameWithCount(hostileCount: Int): ByteBuffer = {
+    val buf = StreamingShuffleTransport.encodeComplete(
+      shuffleId = 0, mapId = 0L, mapIndex = 0, blockCounts = Array(1L, 2L))
+    buf.putInt(17, hostileCount)
+    buf
+  }
+
+  test("decodeAndDispatch rejects an oversize MSG_BLOCK payload length before allocating") {
+    val listener = new RecordingListener
+    intercept[IllegalArgumentException] {
+      StreamingShuffleTransport.decodeAndDispatch(blockFrameWithLen(Int.MaxValue), listener)
+    }
+    listener.blocks.isEmpty mustBe true
+  }
+
+  test("decodeAndDispatch rejects a negative MSG_BLOCK payload length before allocating") {
+    val listener = new RecordingListener
+    // A negative length would otherwise raise NegativeArraySizeException in new Array[Byte](len).
+    intercept[IllegalArgumentException] {
+      StreamingShuffleTransport.decodeAndDispatch(blockFrameWithLen(-1), listener)
+    }
+    listener.blocks.isEmpty mustBe true
+  }
+
+  test("decodeAndDispatch rejects an oversize MSG_COMPLETE partition count before allocating") {
+    val listener = new RecordingListener
+    intercept[IllegalArgumentException] {
+      StreamingShuffleTransport.decodeAndDispatch(completeFrameWithCount(Int.MaxValue), listener)
+    }
+    listener.completions.isEmpty mustBe true
+  }
+
+  test("decodeAndDispatch rejects a negative MSG_COMPLETE partition count before allocating") {
+    val listener = new RecordingListener
+    intercept[IllegalArgumentException] {
+      StreamingShuffleTransport.decodeAndDispatch(completeFrameWithCount(-1), listener)
+    }
+    listener.completions.isEmpty mustBe true
+  }
+
+  test("the RPC handler drops a malformed-length frame without failing the channel") {
+    val listener = new RecordingListener
+    val handler = new StreamingShuffleRpcHandler(listener, debug = false)
+    // Both hostile frames must be swallowed (NonFatal -> log + drop): receive must not throw.
+    noException must be thrownBy { handler.receive(null, blockFrameWithLen(Int.MaxValue)) }
+    noException must be thrownBy { handler.receive(null, completeFrameWithCount(-1)) }
+    listener.blocks.isEmpty mustBe true
+    listener.completions.isEmpty mustBe true
+
+    // A valid COMPLETE after the malformed frames still routes, proving the channel survived.
+    handler.receive(null, StreamingShuffleTransport.encodeComplete(
+      shuffleId = 0, mapId = 0L, mapIndex = 0, blockCounts = Array(2L)))
+    listener.completions.size() mustBe 1
+  }
+
+  test("the streaming transport enables TCP keepalive without mutating the caller's conf") {
+    val conf = new SparkConf(false)
+    val key = "spark.shuffle-streaming.io.enableTcpKeepAlive"
+    conf.contains(key) mustBe false
+    val endpoint = newEndpoint(conf)
+    try {
+      // The transport wires SO_KEEPALIVE on its underlying (cloned) TransportConf so a half-open
+      // connection to a dead peer is reaped (group H: TCP_KEEPALIVE_SECONDS is now wired).
+      endpoint.transport.tcpKeepAliveEnabled mustBe true
+      // It did so on a CLONE: the caller's shared conf is never mutated (module isolation).
+      conf.contains(key) mustBe false
+      // The documented target probe cadence is the AAP-specified 5s (the OS governs the interval).
+      BackpressureProtocol.TCP_KEEPALIVE_SECONDS mustBe 5L
+    } finally {
+      endpoint.stop()
     }
   }
 }

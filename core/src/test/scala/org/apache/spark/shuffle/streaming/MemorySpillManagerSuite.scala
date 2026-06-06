@@ -358,31 +358,86 @@ class MemorySpillManagerSuite extends SparkFunSuite with Matchers with Eventuall
     }
   }
 
-  test("a declined storage grant still buffers and spills the block (zero data loss)") {
+  test("a hard storage-admission failure does NOT store the block (forces sort fallback)") {
     val conf = new SparkConf(false)
       .set(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT, 50)
       .set(config.STREAMING_SHUFFLE_SPILL_THRESHOLD, 80)
-    // budget = 1000 * 50% = 500; the 450B block is over the 400B threshold. Storage grants are
-    // forced to FAIL (memory pressure / OOM risk) via doReturn(false) on acquireStorageMemory.
+    // Storage grants are forced to FAIL on every attempt (sustained memory pressure / OOM risk)
+    // via doReturn(false) on acquireStorageMemory. register runs a synchronous spill pass and
+    // retries the acquisition once; with no resident block to reclaim, the retry also fails, so
+    // this is a HARD admission failure (group B / AAP fallback condition (b)).
     val maxOnHeap = new AtomicLong(1000L)
     val source = new StreamingShuffleSource
     val resolver = newMockResolver()
     withManager(conf, newMockMemoryManager(maxOnHeap, grant = false), resolver, source) { manager =>
       val key = BlockKey(0, 0L, 0, 0L)
       val bytes = bytesOf(450, 5.toByte)
-      // A declined grant returns false: a pure BACKPRESSURE signal, never "not stored".
+      // A hard admission failure returns false AND the block is NOT stored: the streaming writer
+      // must fall back to sort rather than buffer under memory pressure and risk executor OOM.
       manager.register(key, bytes) mustBe false
-      // No storage was reserved, but the bytes are tracked and readable -- nothing is lost.
+      manager.trackedBytesTotal mustBe 0L
       manager.reservedBytesTotal mustBe 0L
-      manager.read(key).map(_.toSeq) mustBe Some(bytes.toSeq)
-      // Memory pressure (an ungranted buffer over the threshold) forces the block to spill to disk,
-      // where it stays readable afterward -- guaranteeing zero data loss under memory pressure.
-      manager.maybeSpill()
+      // Nothing was stored, so the block is not readable from this manager -- there is no
+      // half-stored state to leak. Zero data loss is preserved by the sort fallback, which replays
+      // the consumed record prefix (the FallbackShuffleWriter owns that path), not by this manager.
+      manager.read(key) mustBe None
+    }
+  }
+
+  test("a declined grant relieved by a synchronous spill is admitted on retry (no fallback)") {
+    val conf = new SparkConf(false)
+      .set(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT, 50)
+      .set(config.STREAMING_SHUFFLE_SPILL_THRESHOLD, 80)
+    // budget = 1000 * 50% = 500; spill threshold = 400 bytes. The grant mock models REAL storage
+    // accounting against a 500-byte ceiling: a grant succeeds only while reserved + request <=
+    // ceiling, and a release (driven by a spill) frees room. This lets a spill recover the
+    // budget so a previously-declined grant is admitted, instead of declining permanently.
+    val maxOnHeap = new AtomicLong(1000L)
+    val ceiling = 500L
+    val reserved = new AtomicLong(0L)
+    val memoryManager = mock(classOf[MemoryManager])
+    when(memoryManager.maxOnHeapStorageMemory).thenAnswer(new Answer[java.lang.Long] {
+      override def answer(invocation: InvocationOnMock): java.lang.Long = maxOnHeap.get()
+    })
+    when(memoryManager.acquireStorageMemory(any(), anyLong(), any()))
+      .thenAnswer(new Answer[java.lang.Boolean] {
+        override def answer(invocation: InvocationOnMock): java.lang.Boolean = {
+          val n = invocation.getArgument(1).asInstanceOf[Long]
+          if (reserved.get() + n <= ceiling) {
+            reserved.addAndGet(n)
+            true
+          } else {
+            false
+          }
+        }
+      })
+    when(memoryManager.releaseStorageMemory(anyLong(), any())).thenAnswer(new Answer[Unit] {
+      override def answer(invocation: InvocationOnMock): Unit =
+        reserved.addAndGet(-invocation.getArgument(0).asInstanceOf[Long])
+    })
+    val source = new StreamingShuffleSource
+    withManager(conf, memoryManager, newMockResolver(), source) { manager =>
+      val keyA = BlockKey(0, 0L, 0, 0L)
+      val keyB = BlockKey(0, 1L, 0, 0L)
+      // A (450B) is granted and pushes utilization to 90% -- OVER the 80% threshold, so it is
+      // is a real spill candidate. B (300B) cannot fit under the 500B ceiling while A holds its
+      // grant; a spill of A (register's synchronous spill-and-retry and/or the async threshold
+      // poller) releases A's grant and relieves the pressure. The decline is therefore TRANSIENT:
+      // once the budget is reclaimed, B is admitted and streaming continues WITHOUT falling back.
+      manager.register(keyA, bytesOf(450, 1.toByte)) mustBe true
+      // Retry under patience: whichever spill path frees A's grant first, B's previously-declined
+      // grant is admitted (returns true) within the spill latency. A permanent decline would never
+      // satisfy this, distinguishing a transient decline from a hard admission failure.
       eventually {
-        spillCount(source) mustBe 1L
-        manager.trackedBytesTotal mustBe 0L
+        manager.register(keyB, bytesOf(300, 2.toByte)) mustBe true
       }
-      manager.read(key).map(_.toSeq) mustBe Some(bytes.toSeq)
+      // A was spilled to relieve the pressure (the recovery mechanism actually ran)...
+      eventually {
+        spillCount(source) must be >= 1L
+      }
+      // ...and both blocks remain readable (A from its spill file, B from memory): zero data loss.
+      manager.read(keyA).map(_.toSeq) mustBe Some(bytesOf(450, 1.toByte).toSeq)
+      manager.read(keyB).map(_.toSeq) mustBe Some(bytesOf(300, 2.toByte).toSeq)
     }
   }
 

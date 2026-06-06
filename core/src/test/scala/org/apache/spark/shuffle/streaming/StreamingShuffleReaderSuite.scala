@@ -29,9 +29,9 @@ import org.apache.spark._
 import org.apache.spark.executor.TempShuffleReadMetrics
 import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
-import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.shuffle.{FetchFailedException, IndexShuffleBlockResolver}
+import org.apache.spark.shuffle.ShuffleChecksumUtils
 import org.apache.spark.shuffle.streaming.MemorySpillManager.BlockKey
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
@@ -48,8 +48,9 @@ import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
  * Coverage maps to the streaming-reader requirements in the feature plan:
  *  - read() returns a LAZY/blocking iterator: constructing it performs no eager fetching, and the
  *    streamed records (and the read-metrics they report) appear only as the iterator is drained.
- *  - every received block is validated with CRC32C via the EXISTING [[ShuffleChecksumHelper]]; a
- *    corrupt block is re-requested by its addressable key and the retained block is resent and
+ *  - every received block is validated with CRC32C via the EXISTING
+ *    [[org.apache.spark.shuffle.ShuffleChecksumUtils]] facility; a corrupt block is re-requested by
+ *    its addressable key and the retained block is resent and
  *    consumed successfully, within the bounded retry budget and with no invalidation.
  *  - a producer failure is turned into an atomic partial-read invalidation that throws
  *    [[FetchFailedException]] and increments the `partialReadInvalidations` telemetry.
@@ -84,14 +85,10 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
     out.toByteArray
   }
 
-  // Compute a block's checksum with the EXISTING ShuffleChecksumHelper (CRC32C), exactly as the
-  // producer does, so the reader's validation accepts an uncorrupted block.
-  private def checksumOf(bytes: Array[Byte]): Long = {
-    val algorithm = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
-    val checksum = ShuffleChecksumHelper.getChecksumByAlgorithm(algorithm)
-    checksum.update(bytes, 0, bytes.length)
-    checksum.getValue
-  }
+  // Compute a block's checksum through the EXISTING ShuffleChecksumUtils facility (CRC32C), exactly
+  // as the producer does, so the reader's validation accepts an uncorrupted block.
+  private def checksumOf(bytes: Array[Byte]): Long =
+    ShuffleChecksumUtils.computeChecksum(conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM), bytes)
 
   // Build the end-to-end block metadata a producer would attach to a streamed block.
   private def metaFor(
@@ -159,7 +156,12 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       // StreamingShuffleManager captures it on the driver. The reader resolves the
       // `ShuffleManager.getReader` endMapIndex=Int.MaxValue sentinel to this count, so a test can
       // drive the production full-read path with a reachable completion target.
-      numMaps: Int = 1): (StreamingShuffleReader[Int, Int], TempShuffleReadMetrics) = {
+      numMaps: Int = 1,
+      // Cross-executor rendezvous seam (R-A): the one-shot remote-subscribe thunk the reader fires
+      // when read() begins. Defaults to a no-op (the local-only path every other test exercises);
+      // a test can inject a recording thunk to assert the production wiring `getReader` performs.
+      remoteSubscribe: () => Unit = () => ()):
+      (StreamingShuffleReader[Int, Int], TempShuffleReadMetrics) = {
     val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
     when(dependency.serializer).thenReturn(serializer)
     when(dependency.aggregator).thenReturn(None)
@@ -172,7 +174,8 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       context, readMetrics, conf, backpressure, source, exchange,
       inboxCapacity, maxInboxBytes,
       producerTimeoutMillis = producerTimeoutMillis,
-      retryBackoffStartMillis = retryBackoffStartMillis)
+      retryBackoffStartMillis = retryBackoffStartMillis,
+      remoteSubscribe = remoteSubscribe)
     (reader, readMetrics)
   }
 
@@ -198,6 +201,29 @@ class StreamingShuffleReaderSuite extends SparkFunSuite with SharedSparkContext
       eventually(timeout(Span(2000, Millis)), interval(Span(20, Millis))) {
         spill.trackedBytesTotal mustBe 0L
       }
+    }
+  }
+
+  test("read() fires the remote-subscribe rendezvous thunk exactly once (cross-executor wiring)") {
+    withStreaming { (source, spill, exchange, backpressure) =>
+      val subscribeCount = new AtomicInteger(0)
+      val (reader, _) = newReader(exchange, backpressure, source, 0, 1, 0, 1,
+        remoteSubscribe = () => { subscribeCount.incrementAndGet(); () })
+
+      // The thunk must NOT fire at construction: cross-executor discovery is deferred to the lazy
+      // read() boundary, so a reader that is built but never consumed pays no rendezvous cost and
+      // local-only call sites (and every other test) are unaffected by the default no-op.
+      subscribeCount.get() mustBe 0
+
+      // The first read() fires the thunk exactly once, BEFORE returning the lazy iterator. No
+      // blocks are published, so the iterator is never drained; rendezvous is independent of them.
+      reader.read()
+      subscribeCount.get() mustBe 1
+
+      // A second read() must NOT re-subscribe: the one-shot AtomicBoolean guard makes remote
+      // producer discovery happen at most once per reader, so it can never double-subscribe.
+      reader.read()
+      subscribeCount.get() mustBe 1
     }
   }
 

@@ -17,7 +17,7 @@
 
 package org.apache.spark.shuffle.streaming
 
-import java.util.concurrent.{ScheduledExecutorService, ScheduledFuture, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, ScheduledExecutorService, ScheduledFuture, TimeUnit}
 import java.util.concurrent.atomic.AtomicLong
 
 import scala.util.control.NonFatal
@@ -33,15 +33,19 @@ import org.apache.spark.util.ThreadUtils
  * four capabilities required by the streaming design:
  *
  *  1. Consumer-to-producer heartbeat flow control on a 10s interval with a 5s connect timeout. A
- *     missing or slow consumer pauses the producer; a consumer that stays 2x slower than the
- *     producer for more than 60s flips the [[shouldFallback]] signal so the manager can degrade
- *     the shuffle gracefully to the sort-based engine.
+ *     missing or slow consumer pauses the producer. The [[shouldFallback]] signal -- which the
+ *     manager reads (through the writer) to degrade a shuffle gracefully to sort -- is raised on
+ *     ANY of three sustained conditions: a consumer kept 2x slower than the producer for over 60s,
+ *     token-bucket utilization sustained above 90% of the configured link capacity (network
+ *     saturation), or an external version-mismatch probe (see [[setFallbackProbe]]).
  *  2. A token-bucket rate limiter whose refill rate is `maxBandwidthMBps / numConcurrentShuffles`.
  *     Short bursts are absorbed up to the bucket capacity while the sustained long-term rate is
  *     enforced. A `maxBandwidthMBps` of 0 is the "unlimited" sentinel and disables limiting.
- *  3. QoS priority arbitration via [[comparePriority]]: real shuffle traffic always outranks
- *     speculative-task traffic, and among concurrent shuffles the one with more partitions (then
- *     more buffered data) wins contended bandwidth.
+ *  3. QoS priority arbitration via [[comparePriority]], consulted on the admission path
+ *     ([[tryAcquire]]): real shuffle traffic always outranks speculative-task traffic, and among
+ *     concurrent shuffles the one with more partitions (then more buffered data) wins contended
+ *     bandwidth. Under token scarcity an outranked shuffle DEFERS so the higher-priority shuffle's
+ *     traffic is admitted first.
  *  4. Telemetry: every throttle event increments the `backpressureEvents` counter on the shared
  *     [[StreamingShuffleSource]], exposed over JMX through the existing `MetricRegistry`.
  *
@@ -102,6 +106,9 @@ private[spark] class BackpressureProtocol(
   // Snapshots taken on the previous heartbeat tick to derive per-interval throughput rates.
   private val lastSampledProducerBytes = new AtomicLong(0L)
   private val lastSampledConsumerBytes = new AtomicLong(0L)
+  // Snapshot of cumulative limiter-admitted bytes (bytesTransmitted) on the previous heartbeat
+  // tick, used to derive the per-interval transmitted rate for network-saturation detection.
+  private val lastSampledTransmittedBytes = new AtomicLong(0L)
   private val lastSampleNanos = new AtomicLong(System.nanoTime())
   // Last time a consumer heartbeat (or consumed-byte progress) was observed.
   private val lastConsumerHeartbeatNanos = new AtomicLong(System.nanoTime())
@@ -115,8 +122,28 @@ private[spark] class BackpressureProtocol(
   // Wall-clock nanos since which the consumer has been continuously "too slow"; -1 when keeping
   // up. Mutated only by the single heartbeat thread.
   @volatile private var slowSinceNanos: Long = -1L
+  // Wall-clock nanos since which token-bucket utilization has been continuously above the
+  // network-saturation ratio; -1 when not saturated. Mutated only by the heartbeat thread. Once
+  // the saturated window exceeds NETWORK_SATURATION_SUSTAINED_SECONDS the fallback flag is set
+  // (AAP fallback condition (c): network saturation > 90% of the configured link capacity).
+  @volatile private var saturatedSinceNanos: Long = -1L
   // Guards stop() against double shutdown.
   @volatile private var stopped: Boolean = false
+
+  // External, best-effort fallback probe invoked on each heartbeat tick while NOT already in
+  // fallback. Wired by StreamingEngine to the cross-executor version handshake
+  // (StreamingShuffleRendezvous.detectVersionMismatch): a true result flips [[shouldFallback]] so a
+  // producer/consumer protocol-version mismatch (AAP fallback condition (d)) degrades the shuffle
+  // to sort. Defaults to a no-op so bare unit tests and local mode never probe. @volatile so the
+  // heartbeat thread observes the engine's installed value without extra locking.
+  @volatile private var fallbackProbe: () => Boolean = () => false
+
+  // QoS priority registry (AAP: real shuffle traffic must outrank speculative-task traffic). Maps
+  // an active shuffleId to its [[BackpressureProtocol.ShufflePriority]] descriptor and is consulted
+  // on the token-bucket admission path so that, under token scarcity, a lower-priority shuffle
+  // DEFERS to a higher-priority one. A ConcurrentHashMap because writers on multiple task threads
+  // register/update concurrently while the hot-path acquire calls read it under `this`.
+  private val shufflePriorities = new ConcurrentHashMap[Integer, ShufflePriority]()
 
   // Dedicated daemon scheduler running the consumer-to-producer heartbeat and rate-sampling loop.
   // A daemon single thread keeps telemetry overhead well under the 1% CPU budget and never blocks
@@ -175,20 +202,36 @@ private[spark] class BackpressureProtocol(
   }
 
   /**
-   * Low-level, non-blocking token acquisition. Refills the bucket from elapsed time and, if enough
-   * tokens are available, deducts `bytes` and returns true. This is the pure mechanism with no
-   * telemetry side effects, so callers can cheaply probe availability.
+   * Low-level, non-blocking token acquisition with no QoS arbitration. Equivalent to
+   * [[tryAcquire(shuffleId:Int,bytes:Long)*]] for an unregistered caller, so it never defers. Kept
+   * for callers (and tests) that do not carry a shuffle identity.
    *
    * @param bytes the number of bytes the caller wishes to transmit
    * @return true if the bytes were admitted (tokens deducted), false if currently throttled
    */
-  def tryAcquire(bytes: Long): Boolean = {
+  def tryAcquire(bytes: Long): Boolean = tryAcquire(NO_QOS_SHUFFLE_ID, bytes)
+
+  /**
+   * Low-level, non-blocking token acquisition for a specific shuffle. Refills the bucket from
+   * elapsed time and, if enough tokens are available AND QoS does not require this shuffle to defer
+   * to a higher-priority one (see [[qosShouldDefer]]), deducts `bytes` and returns true. It is the
+   * pure mechanism with no telemetry side effects, so callers can cheaply probe availability.
+   *
+   * @param shuffleId the shuffle requesting bandwidth; [[NO_QOS_SHUFFLE_ID]] opts out of QoS
+   * @param bytes the number of bytes the caller wishes to transmit
+   * @return true if the bytes were admitted (tokens deducted), false if throttled or QoS-deferred
+   */
+  def tryAcquire(shuffleId: Int, bytes: Long): Boolean = {
     if (rateLimitingDisabled || bytes <= 0L) {
       true
     } else {
       synchronized {
         refillTokens()
-        if (availableTokens.get() >= bytes) {
+        val available = availableTokens.get()
+        // Admit only when tokens suffice AND QoS does not require this (outranked) shuffle to defer
+        // to a higher-priority one under scarcity. comparePriority is thereby consulted on the real
+        // admission path, not just in isolation.
+        if (available >= bytes && !qosShouldDefer(shuffleId, available)) {
           availableTokens.addAndGet(-bytes)
           bytesTransmitted.addAndGet(bytes)
           true
@@ -234,7 +277,20 @@ private[spark] class BackpressureProtocol(
    * @param bytes the number of bytes the caller wishes to transmit
    * @return true once admitted, false if the waiting thread was interrupted
    */
-  def acquireBlocking(bytes: Long): Boolean = {
+  def acquireBlocking(bytes: Long): Boolean = acquireBlocking(NO_QOS_SHUFFLE_ID, bytes)
+
+  /**
+   * Blocking acquisition for a specific shuffle, threading its identity through to the token-bucket
+   * admission so QoS arbitration ([[qosShouldDefer]]) applies while waiting: under scarcity an
+   * outranked shuffle keeps deferring until the bucket refills past the QoS reserve (i.e. once the
+   * higher-priority traffic is satisfied). Honors the same interruption, producer-pause, and
+   * fallback semantics as [[acquireBlocking(bytes:Long)*]].
+   *
+   * @param shuffleId the shuffle requesting bandwidth; [[NO_QOS_SHUFFLE_ID]] opts out of QoS
+   * @param bytes the number of bytes the caller wishes to transmit
+   * @return true once admitted, false if the waiting thread was interrupted
+   */
+  def acquireBlocking(shuffleId: Int, bytes: Long): Boolean = {
     // Fast path: with rate limiting disabled there is no token accounting to wait on. We take the
     // fast path ONLY when the producer is neither paused (missing consumer) nor in fallback, so
     // those states are honored even for the "unlimited" bandwidth configuration.
@@ -283,9 +339,10 @@ private[spark] class BackpressureProtocol(
               result = false
           }
         }
-      } else if (rateLimitingDisabled || tryAcquire(bytes)) {
+      } else if (rateLimitingDisabled || tryAcquire(shuffleId, bytes)) {
         // Either limiting is off (we reached here only because of a transient pause that has now
-        // cleared) or enough tokens were available: the block is admitted.
+        // cleared) or enough tokens were available AND QoS did not require this shuffle to defer:
+        // the block is admitted.
         waiting = false
       } else {
         if (!throttled) {
@@ -376,6 +433,22 @@ private[spark] class BackpressureProtocol(
    */
   def producerShouldPause: Boolean = producerPaused
 
+  /**
+   * Installs the external, best-effort fallback probe. Called once by `StreamingEngine` after
+   * construction to wire the cross-executor version handshake
+   * ([[StreamingShuffleRendezvous.detectVersionMismatch]]). The probe is invoked on the heartbeat
+   * thread, only while not already in fallback, so it must be cheap and self-guarding; a true
+   * result raises [[shouldFallback]] (AAP fallback condition (d): producer/consumer version
+   * mismatch). A setter -- rather than a constructor argument -- keeps the existing 3-arg
+   * constructor binary-compatible for all current call sites.
+   *
+   * @param probe returns true when an external fallback condition (e.g. a protocol-version
+   *              mismatch) has been detected; must be best-effort and never throw
+   */
+  def setFallbackProbe(probe: () => Boolean): Unit = {
+    fallbackProbe = probe
+  }
+
   // Periodic heartbeat tick: samples producer/consumer throughput since the previous tick, updates
   // fallback detection, and checks for a missing consumer. Guarded against transient failures so
   // the recurring schedule can never be torn down by an exception.
@@ -393,6 +466,14 @@ private[spark] class BackpressureProtocol(
           (consumerNow - lastSampledConsumerBytes.getAndSet(consumerNow)) / intervalSeconds
         evaluateFallback(producerRate, consumerRate, now)
         detectMissingConsumer(now)
+        // Network saturation (AAP fallback condition (c)): derive the per-interval rate of
+        // limiter-admitted bytes vs the configured per-shuffle link capacity (evaluated below).
+        val transmittedNow = bytesTransmitted.get()
+        val transmittedRate =
+          (transmittedNow - lastSampledTransmittedBytes.getAndSet(transmittedNow)) / intervalSeconds
+        evaluateNetworkSaturation(transmittedRate, now)
+        // External fallback probe (AAP fallback condition (d)): consult the version handshake.
+        checkExternalFallback()
       }
     } catch {
       case NonFatal(e) =>
@@ -449,6 +530,50 @@ private[spark] class BackpressureProtocol(
     }
   }
 
+  // Network-saturation rule (AAP fallback condition (c)): the per-shuffle link capacity is the
+  // token-bucket refill rate (maxBandwidthMBps / numConcurrentShuffles). When the actual admitted
+  // rate stays at or above NETWORK_SATURATION_RATIO (90%) of that capacity for more than
+  // NETWORK_SATURATION_SUSTAINED_SECONDS, the link is treated as saturated and the one-way fallback
+  // flag is flipped so the writer degrades to sort. With rate limiting disabled ("unlimited") there
+  // is no configured capacity to saturate, so the rule never fires. Tracks the start of the
+  // saturated window exactly like evaluateFallback tracks the slow-consumer window.
+  private def evaluateNetworkSaturation(transmittedRate: Double, now: Long): Unit = {
+    val capacity = refillBytesPerSecond
+    val saturated =
+      !rateLimitingDisabled && capacity > 0.0 &&
+        transmittedRate >= capacity * NETWORK_SATURATION_RATIO
+    if (saturated) {
+      if (saturatedSinceNanos < 0L) {
+        saturatedSinceNanos = now
+      } else {
+        val saturatedForSeconds = (now - saturatedSinceNanos).toDouble / NANOS_PER_SECOND
+        if (saturatedForSeconds >= NETWORK_SATURATION_SUSTAINED_SECONDS && !shouldFallbackFlag) {
+          shouldFallbackFlag = true
+          recordBackpressureEvent("network saturation sustained above 90% of link capacity")
+          logWarning("Streaming shuffle network saturation sustained above 90% of the configured " +
+            "link capacity; signaling graceful fallback to sort-based shuffle")
+        }
+      }
+    } else {
+      // Utilization fell back below the saturation ratio: reset the saturated-window tracker.
+      saturatedSinceNanos = -1L
+    }
+  }
+
+  // External fallback probe (AAP fallback condition (d): producer/consumer version mismatch). The
+  // engine wires `fallbackProbe` to the cross-executor version handshake; a true result flips the
+  // one-way fallback flag so the writer degrades to sort. Only consulted while not already in
+  // fallback, so a homogeneous (matching-version) cluster pays a single cheap probe per tick and a
+  // mismatched cluster signals fallback exactly once.
+  private def checkExternalFallback(): Unit = {
+    if (!shouldFallbackFlag && fallbackProbe()) {
+      shouldFallbackFlag = true
+      recordBackpressureEvent("external fallback condition (version mismatch)")
+      logWarning("Streaming shuffle external fallback condition detected (e.g. producer/consumer " +
+        "protocol-version mismatch); signaling graceful fallback to sort-based shuffle")
+    }
+  }
+
   // ============================================================================================
   // QoS priority arbitration
   // ============================================================================================
@@ -477,6 +602,78 @@ private[spark] class BackpressureProtocol(
       // Larger buffered data volume means higher priority, so it is ordered first.
       java.lang.Long.compare(b.dataVolumeBytes, a.dataVolumeBytes)
     }
+  }
+
+  /**
+   * Registers (or re-registers, last-wins) a shuffle's QoS priority so the admission path can
+   * arbitrate bandwidth in its favor. Called by `StreamingShuffleManager.getWriter` for every
+   * streaming shuffle. Idempotent across the many map tasks of one shuffle on an executor.
+   *
+   * @param shuffleId the shuffle to register
+   * @param priority its [[ShufflePriority]] descriptor (speculative-ness, partition count, volume)
+   */
+  def registerShufflePriority(shuffleId: Int, priority: ShufflePriority): Unit = {
+    shufflePriorities.put(Integer.valueOf(shuffleId), priority)
+  }
+
+  /**
+   * Removes a shuffle's QoS priority, called from `StreamingShuffleManager.unregisterShuffle`. A
+   * no-op if the shuffle was never registered.
+   *
+   * @param shuffleId the shuffle to drop from the QoS registry
+   */
+  def unregisterShufflePriority(shuffleId: Int): Unit = {
+    shufflePriorities.remove(Integer.valueOf(shuffleId))
+  }
+
+  /**
+   * Refreshes a registered shuffle's buffered data volume (the QoS tie-breaker) as its writer
+   * emits. A no-op if the shuffle is not registered, so it is always safe to call from the writer.
+   *
+   * @param shuffleId the shuffle whose volume changed
+   * @param dataVolumeBytes the latest buffered/emitted data volume in bytes
+   */
+  def updateShuffleDataVolume(shuffleId: Int, dataVolumeBytes: Long): Unit = {
+    shufflePriorities.computeIfPresent(
+      Integer.valueOf(shuffleId),
+      (_, prev) => prev.copy(dataVolumeBytes = dataVolumeBytes))
+  }
+
+  // Whether some OTHER registered shuffle strictly outranks `shuffleId` (comparePriority < 0). An
+  // unregistered caller (including the NO_QOS_SHUFFLE_ID sentinel) is never outranked, so callers
+  // that opt out of QoS are never deprioritized. Reads the concurrent registry without locking.
+  private def outranked(shuffleId: Int): Boolean = {
+    val self = shufflePriorities.get(Integer.valueOf(shuffleId))
+    if (self == null) {
+      false
+    } else {
+      var found = false
+      val it = shufflePriorities.entrySet().iterator()
+      while (!found && it.hasNext) {
+        val entry = it.next()
+        if (entry.getKey.intValue() != shuffleId && comparePriority(entry.getValue, self) < 0) {
+          found = true
+        }
+      }
+      found
+    }
+  }
+
+  // Tokens reserved for higher-priority traffic: an outranked shuffle may only draw from the bucket
+  // once it has refilled past this reserve, guaranteeing higher-priority shuffles first claim to
+  // the top (1 - QOS_RESERVE_FRACTION) of capacity. Never below one full pipelined block so a lone
+  // outranked shuffle (no actual contention) is not starved indefinitely once the bucket refills.
+  private def qosReserveBytes: Long =
+    math.min(capacityBytes, math.max(MAX_PIPELINED_BLOCK_BYTES,
+      (capacityBytes * QOS_RESERVE_FRACTION).toLong))
+
+  // QoS admission decision: an outranked shuffle DEFERS (is refused) while the bucket is below the
+  // reserve -- i.e. while a higher-priority shuffle is actively draining it. When the bucket has
+  // refilled past the reserve (higher-priority demand satisfied/idle) the outranked shuffle
+  // proceeds, so there is no permanent starvation. Never defers when rate limiting is disabled.
+  // Pure in `available` (does not read the live token field) so it is deterministically testable.
+  private def qosShouldDefer(shuffleId: Int, available: Long): Boolean = {
+    !rateLimitingDisabled && outranked(shuffleId) && available < qosReserveBytes
   }
 
   // ============================================================================================
@@ -540,6 +737,33 @@ private[spark] object BackpressureProtocol {
 
   /** Sustained slow duration that triggers graceful fallback to sort-based shuffle, in seconds. */
   val FALLBACK_SUSTAINED_SECONDS: Double = 60.0
+
+  /**
+   * Token-bucket utilization (admitted rate / configured per-shuffle link capacity) at or above
+   * which the link is considered saturated (AAP fallback condition (c): network saturation > 90%).
+   */
+  val NETWORK_SATURATION_RATIO: Double = 0.9
+
+  /**
+   * Sustained saturation duration that triggers graceful fallback to sort-based shuffle, in
+   * seconds. A sustained window (rather than an instantaneous spike) is required because the token
+   * bucket deliberately absorbs short bursts; only a sustained >90% utilization is true saturation.
+   */
+  val NETWORK_SATURATION_SUSTAINED_SECONDS: Double = 60.0
+
+  /**
+   * Fraction of token-bucket capacity reserved for higher-priority traffic under QoS arbitration.
+   * An outranked shuffle may only draw from the bucket once it has refilled past this reserve, so
+   * higher-priority shuffles always get first claim to the top (1 - fraction) of the bucket.
+   */
+  val QOS_RESERVE_FRACTION: Double = 0.5
+
+  /**
+   * Sentinel shuffle id used by the no-argument [[BackpressureProtocol.tryAcquire(bytes:Long)*]]
+   * and [[BackpressureProtocol.acquireBlocking(bytes:Long)*]] overloads. It is never registered in
+   * the QoS registry, so a caller using it is never deprioritized (opts out of QoS arbitration).
+   */
+  val NO_QOS_SHUFFLE_ID: Int = Int.MinValue
 
   /** Bytes per megabyte, for MB/s to bytes/s conversions. */
   val BYTES_PER_MB: Long = 1024L * 1024L

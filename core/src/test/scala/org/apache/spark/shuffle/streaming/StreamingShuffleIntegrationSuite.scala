@@ -112,8 +112,9 @@ class StreamingShuffleIntegrationSuite extends SparkFunSuite with Matchers with 
     // Each key 0..999 appears exactly n/1000 times with value 1, so every reduced sum is n/1000.
     assert(result.size === 1000)
     assert(result.values.forall(_ == n / 1000))
-    // Very loose smoke guard only -- generous enough to never flake on a busy CI host.
-    assert(elapsedMs < 120000L)
+    // Timing visibility only: per the final checkpoint, integration tests must NOT assert a hard
+    // wall-clock SLA (it flakes on busy CI hosts). The elapsed time is logged above; the 30-50%
+    // latency-reduction target is validated by StreamingShufflePerformanceBenchmark, not here.
   }
 
   test("multi-partition shuffle over a local cluster yields correct aggregates") {

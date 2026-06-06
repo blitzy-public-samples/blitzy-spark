@@ -225,8 +225,10 @@ private[streaming] class SpillableReplayBuffer(
       }
       if (file != null) {
         if (file.exists() && !file.delete()) {
+          // Log only the file NAME (not the absolute path) so the executor-local filesystem layout
+          // is not exposed in routine warnings; the name is sufficient to correlate with the spill.
           logWarning(s"Failed to delete streaming-shuffle replay spill file " +
-            s"${file.getAbsolutePath}")
+            s"${file.getName}")
         }
         file = null
       }

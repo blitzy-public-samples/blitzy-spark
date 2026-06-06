@@ -29,9 +29,9 @@ import org.scalatest.matchers.must.Matchers
 import org.apache.spark.{Partitioner, SharedSparkContext, ShuffleDependency, SparkFunSuite}
 import org.apache.spark.internal.config
 import org.apache.spark.memory.MemoryTestingUtils
-import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.shuffle.IndexShuffleBlockResolver
+import org.apache.spark.shuffle.ShuffleChecksumUtils
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.BlockMeta
 import org.apache.spark.util.Utils
 
@@ -120,21 +120,54 @@ class StreamingShuffleWriterSuite
   }
 
   // A backpressure mock stubbed so the writer's per-block emit path is admitted immediately: no
-  // sustained-slowdown fallback and every blocking acquire succeeds.
+  // sustained-slowdown fallback and every blocking acquire succeeds. The writer paces each block
+  // through the QoS-aware overload acquireBlocking(shuffleId, bytes) (group G wired the shuffle
+  // identity through for priority arbitration), so that two-arg form is stubbed here; the legacy
+  // one-arg overload is also stubbed for completeness.
   private def stubbedBackpressure(): BackpressureProtocol = {
     val bp = mock(classOf[BackpressureProtocol])
     when(bp.shouldFallback).thenReturn(false)
     when(bp.acquireBlocking(anyLong())).thenReturn(true)
+    when(bp.acquireBlocking(anyInt(), anyLong())).thenReturn(true)
     bp
   }
 
-  // An exchange mock whose publishBlock returns `granted`. A false return models the memory-bounded
-  // path withholding a grant (a spill was scheduled / the buffer budget is exhausted), which is the
-  // signal the writer reacts to by recording a backpressure telemetry event.
+  // An exchange mock whose publishBlock returns `granted`. Since group B, a false return models a
+  // HARD memory-admission failure (the spill manager could not admit the bytes even after a spill
+  // pass), which the writer reacts to by recording a backpressure event and throwing
+  // StreamingShuffleFallbackException -- NOT a soft "block still stored" backpressure hint.
   private def stubbedExchange(granted: Boolean): StreamingBlockExchange = {
     val ex = mock(classOf[StreamingBlockExchange])
     when(ex.publishBlock(any(), any())).thenReturn(granted)
     ex
+  }
+
+  // Builds a SINGLE-partition writer over (Int, Array[Byte]) records for the 2MB-cap regression
+  // test. A cloned conf pins bufferSizePercent to its max so the per-partition flush threshold caps
+  // at the 2MB pipelined size (independent of the test executor's memory); large incompressible
+  // values then let a MULTI-record block cross that cap. The exchange/spill collaborators are
+  // mocked (granted = true) so the only fallback trigger exercised is the block-size cap itself.
+  private def newBytesWriter(
+      mapId: Long,
+      exchange: StreamingBlockExchange,
+      source: StreamingShuffleSource): StreamingShuffleWriter[Int, Array[Byte]] = {
+    val dep = mock(classOf[ShuffleDependency[Int, Array[Byte], Array[Byte]]])
+    val onePartition = new Partitioner() {
+      override def numPartitions: Int = 1
+      override def getPartition(key: Any): Int = 0
+    }
+    when(dep.shuffleId).thenReturn(shuffleId)
+    when(dep.partitioner).thenReturn(onePartition)
+    when(dep.serializer).thenReturn(serializer)
+    when(dep.aggregator).thenReturn(None)
+    when(dep.keyOrdering).thenReturn(None)
+    val bytesHandle =
+      new StreamingShuffleHandle[Int, Array[Byte], Array[Byte]](shuffleId, dep, numMaps = 1)
+    val bytesConf = conf.clone.set(config.STREAMING_SHUFFLE_BUFFER_SIZE_PERCENT, 50)
+    val context = MemoryTestingUtils.fakeTaskContext(sc.env)
+    new StreamingShuffleWriter[Int, Array[Byte]](
+      bytesHandle, mapId, context, context.taskMetrics().shuffleWriteMetrics, bytesConf,
+      stubbedBackpressure(), mock(classOf[MemorySpillManager]), exchange, source)
   }
 
   // Reads a single named gauge value from a real StreamingShuffleSource's MetricRegistry.
@@ -231,11 +264,12 @@ class StreamingShuffleWriterSuite
     }
   }
 
-  test("coordinates memory-bounded buffering and spill through the exchange at the threshold") {
+  test("falls back to sort when the exchange reports a hard memory-admission failure") {
     val originalThreshold = conf.get(config.STREAMING_SHUFFLE_SPILL_THRESHOLD)
     // The spill threshold drives the shared MemorySpillManager (gate-tested in its own suite); here
-    // it is pinned to the documented default and an exhausted budget is modeled by publishBlock
-    // reporting a scheduled spill (granted = false).
+    // it is pinned to the documented default and an EXHAUSTED budget is modeled by publishBlock
+    // returning false -- since group B, a HARD admission failure (the spill manager could not
+    // admit the bytes even after a synchronous spill pass), not a soft "block buffered" hint.
     conf.set(config.STREAMING_SHUFFLE_SPILL_THRESHOLD.key, "80")
     val source = new StreamingShuffleSource
     val spillManager = mock(classOf[MemorySpillManager])
@@ -243,18 +277,62 @@ class StreamingShuffleWriterSuite
     val writer = newWriter(
       mapId = 4L, spillManager = spillManager, exchange = exchange, source = source)
     try {
-      writer.write(Random.shuffle((1 to 64).toList).map(i => (i, i)).iterator)
-      // The writer delegated every emitted block to the memory-bounded exchange/spill path...
+      // AAP memory-pressure fallback condition: the writer must NOT continue streaming under an
+      // OOM-risk admission failure. It records the backpressure event and throws
+      // StreamingShuffleFallbackException so the composing FallbackShuffleWriter reverts to sort
+      // BEFORE any MapStatus is advertised -- preserving zero data loss and zero regression.
+      intercept[StreamingShuffleFallbackException] {
+        writer.write(Random.shuffle((1 to 64).toList).map(i => (i, i)).iterator)
+      }
+      // The writer DID attempt to admit a block through the memory-bounded exchange/spill path...
       verify(exchange, atLeastOnce()).publishBlock(any(), any())
-      // ...and reacted to the spill / over-budget signal by recording backpressure telemetry.
+      // ...recorded the over-budget signal as backpressure telemetry before aborting...
       gaugeValue(source, "shuffle.streaming.backpressureEvents") must be > 0L
+      // ...and crucially never advertised a streaming MapStatus (the fallback owns the output).
+      assert(writer.stop(success = true).isEmpty)
     } finally {
       writer.stop(success = false)
       conf.set(config.STREAMING_SHUFFLE_SPILL_THRESHOLD.key, originalThreshold.toString)
     }
   }
 
-  test("computes block checksums using the standard ShuffleChecksumHelper facility (CRC32C)") {
+  test("falls back to sort when a MULTI-record block exceeds the 2MB pipelined cap (group E)") {
+    // Group E regression: the 2MB pipelined-block cap bounds EVERY block, not only single-record
+    // blocks. Each value below is ~1.125MB of incompressible bytes -- comfortably under 2MB on its
+    // own, so NO single record can trip the cap. Routed to ONE partition, the codec-flushed buffer
+    // crosses 2MB only by ACCUMULATING records; the writer must detect the oversize MULTI-record
+    // block and throw StreamingShuffleFallbackException so the composer reverts to sort.
+    val source = new StreamingShuffleSource
+    val exchange = stubbedExchange(granted = true)
+    val writer = newBytesWriter(mapId = 11L, exchange = exchange, source = source)
+    def bigValue(): Array[Byte] = {
+      val v = new Array[Byte](1152 * 1024)
+      Random.nextBytes(v)
+      v
+    }
+    try {
+      // All records hash to the single partition; the block crosses 2MB on record two, before
+      // the rest are ever pulled (write() throws lazily mid-iterator).
+      val ex = intercept[StreamingShuffleFallbackException] {
+        writer.write(Iterator((0, bigValue()), (0, bigValue()), (0, bigValue())))
+      }
+      // The fallback message reports the cap breach...
+      assert(ex.getMessage.contains("pipelined block cap"))
+      // ...and the (>1) record count, PROVING a MULTI-record block -- not a single oversized record
+      // -- triggered the fallback (each individual record is well under the 2MB cap).
+      val recordCount =
+        "across (\\d+) record".r.findFirstMatchIn(ex.getMessage).map(_.group(1).toInt)
+      assert(recordCount.exists(_ > 1), s"expected a multi-record oversize block: ${ex.getMessage}")
+      // The oversize block is rejected at the SIZE gate, BEFORE any publish/admission attempt, so
+      // nothing is streamed or advertised; the composed sort writer owns the entire output.
+      verify(exchange, never()).publishBlock(any(), any())
+      assert(writer.stop(success = true).isEmpty)
+    } finally {
+      writer.stop(success = false)
+    }
+  }
+
+  test("computes block checksums using the standard ShuffleChecksumUtils facility (CRC32C)") {
     val originalAlgorithm = conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM)
     conf.set(config.SHUFFLE_CHECKSUM_ALGORITHM.key, "CRC32C")
     val exchange = stubbedExchange(granted = true)
@@ -267,12 +345,12 @@ class StreamingShuffleWriterSuite
       verify(exchange, atLeastOnce()).publishBlock(metaCaptor.capture(), bytesCaptor.capture())
       val publishedBytes = bytesCaptor.getValue
       val publishedMeta = metaCaptor.getValue
-      // Recompute the checksum over the EXACT published bytes with the SAME standard facility the
-      // production writer uses; equality proves reuse of ShuffleChecksumHelper (no new checksum).
-      val checksum =
-        ShuffleChecksumHelper.getChecksumByAlgorithm(conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM))
-      checksum.update(publishedBytes, 0, publishedBytes.length)
-      publishedMeta.checksum mustBe checksum.getValue
+      // Recompute the checksum over the EXACT published bytes through the SAME standard facility
+      // the production writer uses -- ShuffleChecksumUtils. Equality proves the writer reuses this
+      // exact facility (the AAP-mandated checksum utility) and introduces no new checksum.
+      val expectedChecksum = ShuffleChecksumUtils.computeChecksum(
+        conf.get(config.SHUFFLE_CHECKSUM_ALGORITHM), publishedBytes)
+      publishedMeta.checksum mustBe expectedChecksum
     } finally {
       writer.stop(success = false)
       conf.set(config.SHUFFLE_CHECKSUM_ALGORITHM.key, originalAlgorithm)

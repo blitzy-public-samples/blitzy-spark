@@ -47,11 +47,13 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
  *      delegate to it.
  *
  * ==Design notes for this suite==
- *  - Base trait: [[SharedSparkContext]] (not `LocalSparkContext`). The streaming-path
- *    `registerShuffle` reads `dependency.rdd.partitions.length` on the driver, and the composed
- *    sort fallback writer lazily loads executor components keyed by `spark.app.id`; both require a
- *    live `SparkContext`, so a single shared context (with the running app id copied onto `conf`)
- *    keeps every test real and hermetic. The pure factory-lookup selection tests simply ignore it.
+ *  - Base trait: [[LocalSparkContext]] (per the final-checkpoint test convention). The
+ *    streaming-path `registerShuffle` reads `dependency.rdd.partitions.length` on the driver, and
+ *    the composed sort fallback writer lazily loads executor components keyed by `spark.app.id`;
+ *    both require a live `SparkContext`, so a FRESH local context is initialized before EACH test
+ *    (with the running app id copied onto `conf`) and torn down afterward via `LocalSparkContext`'s
+ *    per-test `afterEach`, keeping every test real, hermetic, and fully isolated. The pure
+ *    factory-lookup selection tests simply ignore it.
  *  - Mocking: the [[org.apache.spark.ShuffleDependency]] is a LENIENT Mockito mock with only the
  *    members the manager / streaming writer / composed sort writer actually dereference stubbed.
  *    A strict (throw-on-unstubbed) mock would be brittle here because dispatch crosses several
@@ -61,19 +63,28 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
  *    the documented delegation to sort, and `SortShuffleManager`'s own behavior (covered by
  *    `SortShuffleManagerSuite`) is never modified.
  */
-class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers with SharedSparkContext {
+class StreamingShuffleManagerSuite extends SparkFunSuite with Matchers with LocalSparkContext {
 
-  // SharedSparkContext starts the SparkContext from `conf`, but Spark only stamps `spark.app.id`
-  // onto the context's internal clone, never back onto this `conf`. The composed SortShuffleManager
-  // reads the app id when it lazily loads its executor components on the first sort `getWriter`
-  // (the fallback path), so copy the running application's id back onto `conf` here. This mirrors
-  // what production `SparkEnv` does and keeps the fallback writer real.
-  override def beforeAll(): Unit = {
-    super.beforeAll()
+  // LocalSparkContext (unlike SharedSparkContext) neither provides a `conf` field nor auto-starts a
+  // context, so we build a fresh SparkConf + local SparkContext before EACH test and let
+  // LocalSparkContext's `afterEach` tear it down -- a fresh context per test keeps every case fully
+  // isolated. Spark stamps `spark.app.id` only onto the context's internal clone, never back onto
+  // this `conf`; the composed SortShuffleManager reads the app id when it lazily loads its executor
+  // components on the first sort `getWriter` (the fallback path), so copy the running application's
+  // id back onto `conf` here. This mirrors what production `SparkEnv` does and keeps the fallback
+  // writer real.
+  private var conf: SparkConf = _
+  private var serializer: JavaSerializer = _
+
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    conf = new SparkConf(false)
+      .setMaster("local[4]")
+      .setAppName("StreamingShuffleManagerSuite")
+    sc = new SparkContext(conf)
     conf.set("spark.app.id", sc.applicationId)
+    serializer = new JavaSerializer(conf)
   }
-
-  private val serializer = new JavaSerializer(conf)
 
   // A live task context over the shared SparkEnv, used to build streaming/sort writers and readers.
   private def fakeContext(): TaskContext = MemoryTestingUtils.fakeTaskContext(sc.env)

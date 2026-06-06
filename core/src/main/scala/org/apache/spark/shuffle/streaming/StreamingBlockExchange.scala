@@ -218,24 +218,34 @@ private[spark] class StreamingBlockExchange(
    *
    * @param meta the block's identity (key, producer address, block id, map index, checksum, size)
    * @param bytes the finalized, integrity-checked block bytes (ownership transfers to the manager)
-   * @return true if storage memory was granted for the bytes; false is a soft backpressure hint
-   *         (the block is still stored and routed) or indicates the exchange has stopped
+   * @return true if the block was stored and routed; false if it was NOT stored -- a hard memory
+   *         -admission failure (the streaming writer must fall back to sort) or the exchange has
+   *         stopped -- in which case nothing was buffered, delivered, or advertised
    */
   def publishBlock(meta: BlockMeta, bytes: Array[Byte]): Boolean = {
     if (stopped) {
       false
     } else {
       val stored = spillManager.register(meta.key, bytes)
-      val state = stateFor(meta.shuffleId)
-      val target = state.synchronized {
-        val reader = state.readers.find(_.matchesBlock(meta))
-        if (reader.isEmpty) {
-          state.pendingBlocks += meta
+      if (!stored) {
+        // Hard memory-admission failure (group B): the spill manager could not admit the bytes even
+        // after a spill pass, so the block was NOT stored. Do not buffer it for replay or route it
+        // to a reader -- its bytes are not retained and could not be re-read. Returning false makes
+        // the streaming writer fall back to sort BEFORE any output is advertised; the fallback
+        // replays the consumed record prefix through sort, so there is zero data loss.
+        false
+      } else {
+        val state = stateFor(meta.shuffleId)
+        val target = state.synchronized {
+          val reader = state.readers.find(_.matchesBlock(meta))
+          if (reader.isEmpty) {
+            state.pendingBlocks += meta
+          }
+          reader
         }
-        reader
+        target.foreach(reader => deliverBlock(reader.consumer, meta, bytes))
+        true
       }
-      target.foreach(reader => deliverBlock(reader.consumer, meta, bytes))
-      stored
     }
   }
 
@@ -401,9 +411,12 @@ private[spark] class StreamingBlockExchange(
    * matching blocks here. No-op if no transport is bound.
    *
    * Note on rendezvous: discovering WHICH executor hosts a given producer (and thus the
-   * `producerHost`/`producerPort` to pass here) is the scheduler/`MapOutputTracker` concern, which
-   * is out of scope for this feature (AAP section 0.6.2) and is therefore driven by the caller. The
-   * data path itself -- the subject of this component -- fully crosses executor boundaries here.
+   * `producerHost`/`producerPort` to pass here) is resolved by the driver-side
+   * [[StreamingShuffleEndpointCoordinator]], which maps each executor id to its
+   * streaming-transport endpoint. The manager wires the reader to query that coordinator and
+   * call this method for each remote peer, so cross-executor subscription is auto-driven WITHOUT
+   * modifying the scheduler or `MapOutputTracker` (AAP section 0.6.2 excludes only modifying those
+   * subsystems, not querying executor metadata). The data path itself crosses executor boundaries.
    *
    * @param producerHost the producer executor's streaming-transport host
    * @param producerPort the producer executor's streaming-transport port
@@ -478,19 +491,25 @@ private[spark] class StreamingBlockExchange(
       producerPort: Int): Unit = {
     if (!stopped) {
       val state = stateFor(meta.shuffleId)
+      var admitted = true
       val target = state.synchronized {
         val reader = state.readers.find(_.matchesBlock(meta))
         if (reader.isEmpty) {
-          // Pre-subscribe race: take local ownership of the bytes and buffer for replay.
-          spillManager.register(meta.key, bytes)
-          state.pendingBlocks += meta
+          // Pre-subscribe race: take LOCAL ownership of the bytes and buffer for replay -- but ONLY
+          // if storage memory is admitted. On a hard admission failure (group B: consumer-side
+          // memory pressure) we neither buffer nor ack below, so the producer keeps its copy and
+          // its resend/timeout machinery re-delivers later; nothing is lost and an OOM is avoided.
+          admitted = spillManager.register(meta.key, bytes)
+          if (admitted) {
+            state.pendingBlocks += meta
+          }
         }
         reader
       }
       if (target.isDefined) {
         remoteSources.put(meta.key, (producerHost, producerPort))
         deliverBlock(target.get.consumer, meta, bytes)
-      } else {
+      } else if (admitted) {
         // Ownership transferred locally above; release the producer's copy.
         val t = transport
         if (t != null) {

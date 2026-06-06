@@ -178,6 +178,77 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with Private
     }
   }
 
+  test("detects sustained network saturation and signals fallback") {
+    // 100 MB/s budget over 1 shuffle => 100 MB/s per-shuffle link capacity (the saturation base).
+    val conf = new SparkConf(false).set(config.STREAMING_SHUFFLE_MAX_BANDWIDTH_MBPS, 100)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val evaluateSaturation = PrivateMethod[Unit](Symbol("evaluateNetworkSaturation"))
+      val capacity = 100.0 * 1024 * 1024
+      val saturatedRate = 0.95 * capacity // 95% of capacity is above the 90% saturation ratio.
+      // A fresh protocol has not signaled fallback; the first saturated sample only starts the
+      // window, so fallback must not fire yet.
+      bp.shouldFallback mustBe false
+      val windowStart = System.nanoTime()
+      bp.invokePrivate(evaluateSaturation(saturatedRate, windowStart))
+      bp.shouldFallback mustBe false
+
+      // Once saturation has been sustained for more than the window, fallback is signaled. Inject a
+      // timestamp 61s later rather than sleeping.
+      bp.invokePrivate(evaluateSaturation(saturatedRate, windowStart + secondsToNanos(61)))
+      bp.shouldFallback mustBe true
+    }
+  }
+
+  test("network utilization dropping below the saturation ratio prevents fallback") {
+    val conf = new SparkConf(false).set(config.STREAMING_SHUFFLE_MAX_BANDWIDTH_MBPS, 100)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val evaluateSaturation = PrivateMethod[Unit](Symbol("evaluateNetworkSaturation"))
+      val capacity = 100.0 * 1024 * 1024
+      val t0 = System.nanoTime()
+      // Start a saturated window (95% of capacity)...
+      bp.invokePrivate(evaluateSaturation(0.95 * capacity, t0))
+      // ...then utilization falls well below 90% (10%), which resets the saturated window.
+      bp.invokePrivate(evaluateSaturation(0.10 * capacity, t0 + secondsToNanos(30)))
+      // A later saturated sample restarts the window from scratch, so the earlier 30s does NOT
+      // count: fallback must still be false.
+      bp.invokePrivate(evaluateSaturation(0.95 * capacity, t0 + secondsToNanos(61)))
+      bp.shouldFallback mustBe false
+    }
+  }
+
+  test("network saturation never fires when bandwidth is unlimited") {
+    // With the default "unlimited" budget there is no configured link capacity to saturate.
+    val conf = new SparkConf(false)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val evaluateSaturation = PrivateMethod[Unit](Symbol("evaluateNetworkSaturation"))
+      val t0 = System.nanoTime()
+      bp.invokePrivate(evaluateSaturation(Double.MaxValue, t0))
+      bp.invokePrivate(evaluateSaturation(Double.MaxValue, t0 + secondsToNanos(120)))
+      bp.shouldFallback mustBe false
+    }
+  }
+
+  test("an external version-mismatch probe signals fallback") {
+    val conf = new SparkConf(false)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val checkExternal = PrivateMethod[Unit](Symbol("checkExternalFallback"))
+      // A probe reporting no mismatch leaves the protocol healthy.
+      bp.setFallbackProbe(() => false)
+      bp.invokePrivate(checkExternal())
+      bp.shouldFallback mustBe false
+
+      // A probe reporting a producer/consumer version mismatch flips the fallback signal so the
+      // writer degrades the shuffle to sort-based shuffle (AAP fallback condition (d)).
+      bp.setFallbackProbe(() => true)
+      bp.invokePrivate(checkExternal())
+      bp.shouldFallback mustBe true
+    }
+  }
+
   test("QoS arbitration prioritizes shuffle traffic over speculative tasks") {
     val conf = new SparkConf(false)
     withProtocol(conf, numConcurrentShuffles = 1, new StreamingShuffleSource) { bp =>
@@ -201,6 +272,52 @@ class BackpressureProtocolSuite extends SparkFunSuite with Matchers with Private
 
       // Identical descriptors are equal in priority.
       bp.comparePriority(bigVol, bigVol) mustBe 0
+    }
+  }
+
+  test("QoS admission defers an outranked shuffle under token scarcity") {
+    // A limited budget makes the token bucket finite, so the QoS reservation applies: 100 MB/s over
+    // 1 shuffle => 100 MB/s refill, ~100 MB capacity, ~50 MB QoS reserve.
+    val conf = new SparkConf(false).set(config.STREAMING_SHUFFLE_MAX_BANDWIDTH_MBPS, 100)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      val realId = 1
+      val specId = 2
+      // A real (non-speculative) shuffle outranks a speculative one regardless of size.
+      bp.registerShufflePriority(realId, ShufflePriority(isSpeculative = false, 4, 0L))
+      bp.registerShufflePriority(specId, ShufflePriority(isSpeculative = true, 100, 0L))
+
+      val reserve = bp.invokePrivate(PrivateMethod[Long](Symbol("qosReserveBytes"))())
+      reserve must be > 0L
+      val qosShouldDefer = PrivateMethod[Boolean](Symbol("qosShouldDefer"))
+      val scarce = reserve - 1L
+
+      // Under scarcity (bucket below the reserve) the outranked speculative shuffle DEFERS, while
+      // the higher-priority real shuffle is admitted at the SAME token level: admission order
+      // changes in favor of real shuffle traffic.
+      bp.invokePrivate(qosShouldDefer(specId, scarce)) mustBe true
+      bp.invokePrivate(qosShouldDefer(realId, scarce)) mustBe false
+
+      // Once the bucket has refilled to the reserve there is no scarcity, so even the outranked
+      // shuffle proceeds (the reservation throttles but never starves it permanently).
+      bp.invokePrivate(qosShouldDefer(specId, reserve)) mustBe false
+
+      // After the higher-priority shuffle unregisters, the formerly-outranked shuffle no longer
+      // defers even under scarcity.
+      bp.unregisterShufflePriority(realId)
+      bp.invokePrivate(qosShouldDefer(specId, scarce)) mustBe false
+    }
+  }
+
+  test("QoS admission never defers when bandwidth is unlimited") {
+    // With unlimited bandwidth the public admission path bypasses QoS entirely (no reservation).
+    val conf = new SparkConf(false)
+    val source = new StreamingShuffleSource
+    withProtocol(conf, numConcurrentShuffles = 1, source) { bp =>
+      bp.registerShufflePriority(1, ShufflePriority(isSpeculative = false, 100, 0L))
+      bp.registerShufflePriority(2, ShufflePriority(isSpeculative = true, 1, 0L))
+      // The outranked (speculative) shuffle is still admitted because rate limiting is disabled.
+      bp.tryAcquire(2, 4096L) mustBe true
     }
   }
 

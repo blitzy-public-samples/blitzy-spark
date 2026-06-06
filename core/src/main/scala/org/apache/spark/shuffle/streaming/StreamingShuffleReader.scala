@@ -19,16 +19,15 @@ package org.apache.spark.shuffle.streaming
 
 import java.io.ByteArrayInputStream
 import java.util.concurrent.{ConcurrentLinkedQueue, LinkedBlockingQueue, Semaphore, TimeUnit}
-import java.util.concurrent.atomic.AtomicReference
-import java.util.zip.Checksum
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import org.apache.spark._
 import org.apache.spark.internal.{config, Logging}
-import org.apache.spark.network.shuffle.checksum.ShuffleChecksumHelper
 import org.apache.spark.shuffle.{FetchFailedException, ShuffleReader, ShuffleReadMetricsReporter}
+import org.apache.spark.shuffle.ShuffleChecksumUtils
 import org.apache.spark.shuffle.streaming.StreamingBlockExchange.{BlockMeta, StreamingBlockConsumer}
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.CompletionIterator
@@ -61,8 +60,9 @@ import org.apache.spark.util.collection.ExternalSorter
  *     flow control. The inbox is BOUNDED by message count and block bytes, so a fast
  *     producer blocks in the delivery callback (backpressure) rather than accumulating
  *     unbounded arrays.
- *  3. CRC32C integrity with block-specific retransmission: every received block is validated with
- *     the EXISTING [[ShuffleChecksumHelper]] (CRC32C). A corrupt block is re-requested by
+ *  3. CRC32C integrity with block-specific retransmission: every received block is validated
+ *     through the EXISTING [[org.apache.spark.shuffle.ShuffleChecksumUtils]] facility (CRC32C). A
+ *     corrupt block is re-requested by
  *     its addressable key via [[StreamingBlockExchange.requestResend]] with exponential backoff
  *     (start 1s, doubling) up to [[BackpressureProtocol.MAX_RETRY_ATTEMPTS]] attempts before the
  *     read is invalidated.
@@ -152,7 +152,8 @@ private[spark] class StreamingShuffleReader[K, C](
     maxInboxBytes: Int = StreamingShuffleReader.DefaultMaxInboxBytes,
     fallbackOnSilence: Boolean = false,
     producerTimeoutMillis: Long = StreamingShuffleReader.DefaultProducerTimeoutMillis,
-    retryBackoffStartMillis: Long = StreamingShuffleReader.DefaultRetryBackoffStartMillis)
+    retryBackoffStartMillis: Long = StreamingShuffleReader.DefaultRetryBackoffStartMillis,
+    remoteSubscribe: () => Unit = () => ())
   extends ShuffleReader[K, C] with StreamingBlockConsumer with Logging {
 
   import StreamingShuffleReader._
@@ -238,6 +239,19 @@ private[spark] class StreamingShuffleReader[K, C](
   // Touched solely by the single task thread that drains the iterator, so it needs no
   // synchronization.
   private var anyRecordYielded: Boolean = false
+
+  // One-shot guard for the cross-executor remote-subscribe rendezvous (R-A). `read()` invokes the
+  // injected `remoteSubscribe` thunk EXACTLY once, the first time the reduce task begins consuming.
+  // The thunk (wired by `StreamingShuffleManager.getReader`) resolves the producer executors'
+  // streaming endpoints from the driver-side `StreamingShuffleEndpointCoordinator` and calls
+  // `exchange.subscribeRemote(...)` for each REMOTE producer, so this reducer discovers and pulls
+  // from producers on OTHER executors automatically -- the local `exchange.registerReader` above
+  // only covers co-located, in-process producers. Subscribe-once-at-read is sufficient because the
+  // DAG scheduler (UNMODIFIED) submits the reduce stage strictly AFTER the map stage completes, so
+  // every producer endpoint is already registered with the coordinator before any reducer runs.
+  // The default no-op thunk keeps single-executor/local-mode and all existing tests behaving
+  // exactly as before (local-only subscription).
+  private val remoteSubscribed = new AtomicBoolean(false)
 
   if (debug) {
     logDebug(s"StreamingShuffleReader created for shuffle $shuffleId partitions " +
@@ -330,6 +344,19 @@ private[spark] class StreamingShuffleReader[K, C](
 
   /** Read the combined key-values for this reduce task. */
   override def read(): Iterator[Product2[K, C]] = {
+    // Cross-executor rendezvous (R-A): discover + subscribe to REMOTE producers exactly once, when
+    // this reduce task starts consuming. Co-located producers are already covered by the local
+    // `exchange.registerReader` performed during construction; this thunk additionally resolves
+    // producer endpoints on OTHER executors from the driver-side coordinator and issues a
+    // `subscribeRemote` to each, so cross-executor streaming is driven automatically in production.
+    // It is invoked here (not in the constructor) so the discovery RPC is paid lazily on the task
+    // thread, and guarded so re-invocation of `read()` cannot double-subscribe. The thunk is
+    // best-effort: any failure inside it falls back to local-only delivery (see getReader), and the
+    // unbinding of in-progress coverage still drives FetchFailedException-based recomputation.
+    if (remoteSubscribed.compareAndSet(false, true)) {
+      remoteSubscribe()
+    }
+
     // CRITICAL lazy boundary: the streaming record iterator performs ALL polling/blocking/fetching
     // behind this iterator. `read()` itself does not block or fetch eagerly, so unchanged call
     // sites see the identical contract to BlockStoreShuffleReader.read().
@@ -551,8 +578,8 @@ private[spark] class StreamingShuffleReader[K, C](
     private def receiveChunk(chunk: BlockChunk): Iterator[(Any, Any)] = {
       var current = chunk
       var attempts = 1
-      // Coexistence: integrity is verified with the EXISTING ShuffleChecksumHelper (CRC32C), the
-      // same facility sort-based shuffle uses; no new checksum implementation is introduced.
+      // Coexistence: integrity is verified through the EXISTING ShuffleChecksumUtils facility
+      // (CRC32C), the same facility sort-based shuffle uses; no new checksum impl is introduced.
       while (!validateChecksum(current.bytes, current.meta.checksum)) {
         if (attempts >= MaxRetryAttempts) {
           // Unrecoverable corruption after the full retry budget: invalidate atomically.
@@ -642,13 +669,10 @@ private[spark] class StreamingShuffleReader[K, C](
     }
   }
 
-  // Recompute the block checksum with the EXISTING ShuffleChecksumHelper and compare it to the
-  // producer-computed value transmitted with the block. CRC32C by default (configurable).
-  private def validateChecksum(bytes: Array[Byte], expected: Long): Boolean = {
-    val checksum: Checksum = ShuffleChecksumHelper.getChecksumByAlgorithm(checksumAlgorithm)
-    checksum.update(bytes, 0, bytes.length)
-    checksum.getValue == expected
-  }
+  // Recompute the block checksum through the EXISTING ShuffleChecksumUtils facility and compare it
+  // to the producer-computed value transmitted with the block. CRC32C by default (configurable).
+  private def validateChecksum(bytes: Array[Byte], expected: Long): Boolean =
+    ShuffleChecksumUtils.computeChecksum(checksumAlgorithm, bytes) == expected
 
   // Classify a producer address as local (same executor) when a running SparkEnv is available,
   // otherwise treat it as remote. Used only to attribute read metrics to the right counters.
