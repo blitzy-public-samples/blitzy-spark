@@ -284,6 +284,59 @@ support tasks as short as 200 ms, because it reuses one executor JVM across many
 a low task launching cost, so you can safely increase the level of parallelism to more than the
 number of cores in your clusters.
 
+## Streaming Shuffle
+
+Spark 4.1.0 introduces an opt-in *streaming shuffle* engine, designed to stream intermediate shuffle
+data directly from map (producer) tasks to reduce (consumer) tasks through bounded in-memory buffers,
+rather than first materializing it to disk as the default sort-based shuffle does. For shuffle-bound,
+latency-sensitive workloads — typically those moving 10GB or more of shuffle data across 100 or more
+partitions — it targets a 30-50% reduction in end-to-end shuffle latency. CPU-bound workloads are
+expected to see a smaller benefit (around 5-10%).
+
+**Availability.** `spark.shuffle.manager=streaming` is now selectable: this release ships the
+`StreamingShuffleManager`, its shuffle-manager factory registration, the streaming data-plane
+components, and the manager-driven automatic fallback to sort-based shuffle. Activation is
+**two-fold and opt-in** — streaming is engaged for a shuffle only when both
+`spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true` are set; selecting the
+manager with the flag left at its default `false` simply delegates every shuffle to the composed
+sort-based engine, so the tuning advice below applies once you set the flag. See the
+[Streaming Shuffle](streaming-shuffle.html) guide for the full architecture, current behavior, and
+remaining limitations.
+
+Streaming shuffle is **disabled by default** and is turned on only by setting both
+`spark.shuffle.manager=streaming` and `spark.shuffle.streaming.enabled=true`. It is designed to
+**coexist with, and never replace, the default sort-based shuffle**: the streaming manager composes a
+sort-based shuffle manager and automatically falls back to it for memory-bound workloads or whenever
+a runtime fallback condition fires, so jobs that do not benefit from streaming incur no regression.
+
+When tuning streaming shuffle, consider the following properties (all require an executor restart to
+take effect, as there is no dynamic reconfiguration in this version):
+
+* `spark.shuffle.streaming.bufferSizePercent` (default 20, range 1-50) controls the percent of
+  executor memory reserved for per-partition streaming buffers; the per-partition buffer size is
+  `(executorMemory * bufferSizePercent / 100) / numPartitions`. Increase it for workloads with
+  fewer, larger partitions; decrease it when executors are memory-constrained.
+* `spark.shuffle.streaming.spillThreshold` (default 80, range 50-95) sets the buffer-utilization
+  percent at which the largest buffered partitions spill to disk. Lower it if you observe memory
+  pressure; raise it (cautiously) to keep more data in memory on executors with ample memory.
+* `spark.shuffle.streaming.maxBandwidthMBps` (default 0, meaning unlimited) caps per-executor
+  streaming bandwidth via a token-bucket rate limiter. Set a finite value to protect a shared or
+  saturated network.
+
+If a consumer falls well behind its producer, memory pressure prevents buffer allocation, the
+per-shuffle link is saturated, a producer/consumer protocol version mismatch is detected, or a block
+is too large to pipeline, the streaming manager automatically reverts the affected task to sort-based
+shuffle without failing it: partial streaming state is discarded and the records are re-written
+through the composed sort engine before any map output is advertised, which then advertises the map
+output as usual. All four documented fallback conditions -- sustained-slow consumer, memory-pressure
+admission failure, sustained network saturation (>=90% of the configured per-shuffle bandwidth), and
+protocol version mismatch -- are wired as automatic runtime triggers in this release. The reader-side
+fallback is duplication-free only before any record has been yielded to the consumer; the
+[Streaming Shuffle](streaming-shuffle.html) guide enumerates the fallback model precisely. For the full architecture, fallback model,
+troubleshooting, and feature-flag migration guidance see that guide; for the complete list of
+properties, see the [Shuffle Behavior](configuration.html#shuffle-behavior) section of the
+configuration guide.
+
 ## Broadcasting Large Variables
 
 Using the [broadcast functionality](rdd-programming-guide.html#broadcast-variables)

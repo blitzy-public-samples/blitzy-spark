@@ -1445,6 +1445,80 @@ Apart from these, the following properties are also available, and may be useful
   </td>
   <td>3.4.0</td>
 </tr>
+<tr>
+  <td><code>spark.shuffle.streaming.enabled</code></td>
+  <td>false</td>
+  <td>
+    Whether to enable the opt-in streaming shuffle engine, which streams intermediate shuffle data
+    directly from map (producer) tasks to reduce (consumer) tasks through bounded in-memory buffers
+    governed by a backpressure protocol, instead of materializing it to disk. This flag takes effect
+    only when <code>spark.shuffle.manager</code> is also set to <code>streaming</code>; otherwise it
+    is ignored, and sort-based shuffle remains the default and the automatic fallback engine.
+    <b>Availability:</b> <code>spark.shuffle.manager=streaming</code> now selects
+    <code>StreamingShuffleManager</code> (its shuffle-manager factory registration has landed), but
+    streaming is engaged for a given shuffle only when this flag is also <code>true</code> and the
+    shuffle is supported. When the manager is selected with this flag left <code>false</code> (or for
+    a shuffle that streaming cannot serve, such as one requiring map-side combine), the manager
+    transparently delegates to the composed sort-based engine, and at run time any fallback condition
+    (for example a sustained-slow consumer, an admission/memory-pressure signal, or an over-sized
+    unsplittable block) automatically degrades that task to sort-based shuffle without failing it.
+    Changing this value requires an executor restart (no dynamic reconfiguration in this version).
+    See <a href="streaming-shuffle.html">Streaming Shuffle</a> for the full architecture, current
+    behavior, and remaining limitations.
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.bufferSizePercent</code></td>
+  <td>20</td>
+  <td>
+    Percent (between 1 and 50) of executor memory reserved for streaming-shuffle per-partition
+    buffers. The per-partition buffer size is computed as
+    (executorMemory * bufferSizePercent / 100) / numPartitions. Only used when streaming shuffle is
+    active (<code>spark.shuffle.manager=streaming</code> and
+    <code>spark.shuffle.streaming.enabled=true</code>); see
+    <code>spark.shuffle.streaming.enabled</code> above for availability.
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.spillThreshold</code></td>
+  <td>80</td>
+  <td>
+    Buffer-utilization percent (between 50 and 95) at which streaming shuffle spills the largest
+    buffered partitions (selected by LRU) to disk via the block manager, to prevent memory
+    exhaustion. Only used when streaming shuffle is active
+    (<code>spark.shuffle.manager=streaming</code> and
+    <code>spark.shuffle.streaming.enabled=true</code>); see
+    <code>spark.shuffle.streaming.enabled</code> above for availability.
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.maxBandwidthMBps</code></td>
+  <td>0 (unlimited)</td>
+  <td>
+    Per-executor streaming-shuffle bandwidth limit in MB/s, enforced by a token-bucket rate limiter
+    (refill rate = maxBandwidthMBps / numConcurrentShuffles). A value of <code>0</code> means
+    unlimited (no rate limiting). Only used when streaming shuffle is active
+    (<code>spark.shuffle.manager=streaming</code> and
+    <code>spark.shuffle.streaming.enabled=true</code>); see
+    <code>spark.shuffle.streaming.enabled</code> above for availability.
+  </td>
+  <td>4.1.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.streaming.debug</code></td>
+  <td>false</td>
+  <td>
+    Whether to enable verbose debug logging for streaming shuffle. Keep this disabled in production
+    to limit log volume. Only used when streaming shuffle is active
+    (<code>spark.shuffle.manager=streaming</code> and
+    <code>spark.shuffle.streaming.enabled=true</code>); see
+    <code>spark.shuffle.streaming.enabled</code> above for availability.
+  </td>
+  <td>4.1.0</td>
+</tr>
 </table>
 
 ### Spark UI

@@ -109,9 +109,18 @@ private[spark] object ShuffleManager {
   }
 
   def getShuffleManagerClassName(conf: SparkConf): String = {
+    // Coexistence strategy: "streaming" is an opt-in shuffle backend that COEXISTS WITH -- never
+    // replaces -- the default sort-based shuffle. It is selected via
+    // spark.shuffle.manager=streaming and gated further by spark.shuffle.streaming.enabled;
+    // "sort"/"tungsten-sort" remain the default AND the fallback engine (StreamingShuffleManager
+    // composes a SortShuffleManager and gracefully degrades to it when streaming is disabled or a
+    // fallback condition fires). The manager class is resolved dynamically by
+    // object ShuffleManager.create -> Utils.instantiateSerializerOrShuffleManager (above), so
+    // registering the fully-qualified class name is sufficient and SparkEnv requires no change.
     val shortShuffleMgrNames = Map(
       "sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName,
-      "tungsten-sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName)
+      "tungsten-sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName,
+      "streaming" -> classOf[org.apache.spark.shuffle.streaming.StreamingShuffleManager].getName)
 
     val shuffleMgrName = conf.get(config.SHUFFLE_MANAGER)
     shortShuffleMgrNames.getOrElse(shuffleMgrName.toLowerCase(Locale.ROOT), shuffleMgrName)
